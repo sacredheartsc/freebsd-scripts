@@ -1,0 +1,839 @@
+#!/bin/sh
+
+# BSD 2-Clause License
+#
+# Copyright (c) 2023, stonewall (stonewall@sacredheartsc.com)
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+# 1. Redistributions of source code must retain the above copyright notice, this
+#    list of conditions and the following disclaimer.
+#
+# 2. Redistributions in binary form must reproduce the above copyright notice,
+#    this list of conditions and the following disclaimer in the documentation
+#    and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+# OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+#
+# -----------------------------------------------------------------------------
+#
+#                                    JMJ
+#
+# This script is a thin wrapper around various jail(8), zfs(8), and rctl(8)
+# commands used to manage my jail-based virtualization platform on FreeBSD.
+#
+# This is not a general-purpose tool. It is tailored to my opinionated methods
+# for managing jails. Specifically:
+#
+#   - Everything uses ZFS.
+#
+#   - Every jail is a thick VNET jail.
+#
+#   - There is *zero* IPv6 support.
+#
+#   - All jails are started automatically on boot.
+#
+#   - Each jail's configuration lives at /etc/jails.conf.d/$jailname.conf.
+#
+#   - Jail resource limits are managed by rctl(8).
+#
+#   - Each jail gets two ZFS datasets: $jail/os and $jail/data.
+#
+#   - The 'os' dataset contains the root filesystem. It is cloned from a ZFS
+#     template and is managed by the host.
+#
+#   - The 'data' dataset contains arbitrary data. It is delegated to the jail
+#     and managed from within the jail itself.
+#
+#     This allows us to wipe and reprovision the OS from a fresh template,
+#     while leaving application data intact.
+#
+# This tool does not touch your networking configuration, other than to create
+# an epair(4) virtual ethernet device for each running jail. If you need
+# bridges, LAGGs, or VLAN interfaces, you'll have to configure those yourself.
+#
+# If you specify an IP address, it will be configured statically in the jail's
+# /etc/rc.conf. Otherwise, the jail will use DHCP.
+#
+# To prepare your host for jailctl-managed jails, run `jailctl init`. This will
+# create the jail dataset. You may need to reboot your host to enable resource
+# accounting via RCTL.
+#
+#      TLDR:
+#
+# Install jailctl:
+#
+#   $ install -m 0555 jailctl /usr/local/sbin/jailctl
+#
+# Initialize the jail dataset and write necessary config files:
+#
+#   $ jailctl init
+#
+# A template dataset with a FreeBSD rootfs was automatically created:
+#
+#   $ jailctl list-templates
+#     freebsd13
+#
+# Create a new jail with DHCP:
+#
+#   $ jailctl create -i em0 myjail1 freebsd13
+#
+# A more complex example, using a static IP (10.11.199.17) and resource limits
+# (max 400% CPU utilization, max 4GB RAM, and 128GB disk quota):
+#
+#   $ jailctl create \
+#      -i em0 \
+#      -a 10.11.199.17 -n 255.255.255.0 -g 10.11.199.1 \
+#      -r 8.8.8.8 -r 8.8.4.4 \
+#      -s sub.example.com -s example.com \
+#      -c 400 -m 4G -q 128G
+#      myjail2 freebsd13
+#
+# -----------------------------------------------------------------------------
+
+
+# Shellcheck doesn't support FreeBSD's /bin/sh, but we can get pretty close:
+# shellcheck shell=dash disable=SC3033
+:
+
+set -eu -o pipefail
+
+cmd::main(){
+  local usage="COMMAND [ARGS]...
+Commands:
+  create              Create a new jail
+  destroy             Delete a jail and its dataset
+  download-release    Download and create a FreeBSD release template
+  edit                Edit a jail's configuration
+  exec                Run a command within the jail
+  init                Initialize the jail dataset
+  list|ls             List configured jails
+  list-templates|lst  List available templates
+  restart             Restart a jail
+  shell|sh            Run a shell within the jail
+  show                Show jail configuration
+  statistics|stat     Show running jail statistics
+  start               Start a jail
+  stop                Stop a jail
+  update-release      Update a FreeBSD release template"
+
+  while getopts :h opt; do
+    case $opt in
+      h) cmd::help ;;
+      ?) cmd::usage "unknown option: ${OPTARG}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  [ $# -ge 1 ] || cmd::usage 'no comand specified'
+  local cmd=$1
+  shift
+
+  case $cmd in
+    create)             cmd::create "$@" ;;
+    destroy)            cmd::destroy "$@" ;;
+    download-release)   cmd::download_release "$@" ;;
+    edit)               cmd::edit "$@" ;;
+    exec)               cmd::exec "$@" ;;
+    init)               cmd::init "$@" ;;
+    list|ls)            cmd::list "$@" ;;
+    list-templates|lst) cmd::list_templates "$@" ;;
+    restart)            cmd::restart "$@" ;;
+    shell|sh)           cmd::shell "$@" ;;
+    show)               cmd::show "$@" ;;
+    start)              cmd::start "$@" ;;
+    statistics|stat)    cmd::statistics "$@" ;;
+    stop)               cmd::stop "$@" ;;
+    update-release)     cmd::update_release "$@" ;;
+    *)                  cmd::usage "unknown command: ${cmd}" ;;
+  esac
+}
+
+
+################################################################################
+# Global variable definitions.
+################################################################################
+readonly JAIL_HOME=/usr/local/jails
+readonly JAIL_DATASET=zroot/jails
+
+# shellcheck disable=SC2155
+readonly DEFAULT_DOMAIN=$(hostname -d)
+readonly DEFAULT_INTERFACE=vtnet0
+readonly DEFAULT_NETMASK=255.255.255.0
+readonly DEFAULT_OS_QUOTA=24G
+readonly DEFAULT_DATA_QUOTA=8G
+
+# Leave these values alone.
+readonly JAIL_BPF_RULESET=1000
+readonly DEFAULT_DEVFS_RULESET=5
+
+
+################################################################################
+# Standard helper functions.
+################################################################################
+die(){
+  printf '%s: %s\n' jailctl "$*" 1>&2
+  exit 1
+}
+
+
+################################################################################
+# CLI-related functions.
+################################################################################
+cmd::help(){
+  printf 'Usage: %s %s\n' jailctl "$usage"
+  [ -n "${help:-}" ] && printf '%s\n' "$help"
+  exit 0
+}
+
+cmd::usage(){
+  [ $# -gt 0 ] && printf '%s: %s\n' "jailctl" "$1" 1>&2
+  printf 'Usage: %s %s\n' jailctl "${usage}" 1>&2
+  exit 2
+}
+
+cmd::create(){
+  local usage='create [-a IP] [-b] [-c CPULIMIT] [-d DOMAIN] [-g GATEWAY] [-i INTERFACE]
+        [-m MEMLIMIT] [-n NETMASK] [-q QUOTA] [-Q OS_QUOTA] [-r NAMESERVER]
+        [-s SEARCHDOMAIN] NAME TEMPLATE'
+  local help="Create a new jail.
+Options:
+  -a IP            IPv4 address
+  -b               Enable BPF device (allows DHCP, tcpdump, etc)
+  -c CPULIMIT      %CPU limit (100 for one core, 200 for two cores, etc)
+  -d DOMAIN        Host domain name
+  -g GATEWAY       Default IPv4 gateway.
+  -i INTERFACE     Host network interface to bridge
+  -m MEMLIMIT      Virtual memory limit
+  -n NETMASK       IPv4 netmask
+  -q QUOTA         Quota for delegated dataset
+  -Q OS_QUOTA      Quota for root filesystem
+  -r NAMESERVER    DNS resolver
+  -s SEARCHDOMAIN  DNS search domain"
+
+  local \
+    jail_bpf \
+    jail_data_quota \
+    jail_domain \
+    jail_gateway \
+    jail_interface=$DEFAULT_INTERFACE \
+    jail_ip \
+    jail_nameservers \
+    jail_netmask \
+    jail_os_quota \
+    jail_searchdomains
+
+  local opt
+  while getopts :a:bc:d:g:hi:m:n:q:Q:r:s: opt; do
+    case $opt in
+      a) jail_ip=$OPTARG ;;
+      b) jail_bpf=true ;;
+      c) jail_cpulimit=$OPTARG ;;
+      d) jail_domain=$OPTARG ;;
+      g) jail_gateway=$OPTARG ;;
+      h) cmd::help ;;
+      i) jail_interface=$OPTARG ;;
+      m) jail_memlimit=$OPTARG ;;
+      n) jail_netmask=$OPTARG ;;
+      q) jail_data_quota=$OPTARG ;;
+      Q) jail_os_quota=$OPTARG ;;
+      r) jail_nameservers="${jail_nameservers:-} ${OPTARG}" ;;
+      s) jail_searchdomains="${jail_searchdomains:-} ${OPTARG}" ;;
+      :) cmd::usage "missing option value: -${OPTARG}" ;;
+      ?) cmd::usage "unknown option: -${OPTARG}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  [ $# -lt 1 ] && cmd::usage 'NAME not specified'
+  [ $# -lt 2 ] && cmd::usage 'TEMPLATE not specified'
+  [ $# -gt 2 ] && cmd::usage 'too many arguments'
+  local name=$1 template=$2
+
+  jail::exists "$name"                && die "jail name already in use: ${name}"
+  jail::template::exists "$template"  || die "no such template: ${template}"
+  interface::exists "$jail_interface" || die "no such interface: ${jail_interface}"
+
+  jail::create "$name" "$template"
+}
+
+cmd::destroy(){
+  local usage='destroy [-y] JAIL'
+  local help="Delete a jail and its dataset.
+Options:
+  -y  Don't prompt for confirmation"
+
+  local noconfirm=false answer opt
+
+  while getopts :hy opt; do
+    case $opt in
+      h) cmd::help ;;
+      y) noconfirm=true ;;
+      ?) cmd::usage "unknown option: -${OPTARG}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  [ $# -lt 1 ] && cmd::usage 'JAIL not specified'
+  [ $# -gt 1 ] && cmd::usage 'too many arguments'
+  local jail=$1
+
+  jail::exists "$jail" || die "no such jail: ${jail}"
+
+  if [ "$noconfirm" != true ]; then
+    read -rp "Really delete ${jail}? (y/N) " answer
+    case $answer in
+      [yY]|[yY][eE][sS]) : ;;
+      *) die 'operation cancelled' ;;
+    esac
+  fi
+
+  jail::destroy "$jail"
+}
+
+cmd::download_release() {
+  local usage='download-release RELEASE'
+  local help='Download and create a FreeBSD release template.'
+
+  local opt
+  while getopts :h opt; do
+    case $opt in
+      h) cmd::help ;;
+      ?) cmd::usage "unknown option: -${OPTARG}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  [ $# -lt 1 ] && cmd::usage 'RELEASE not specified'
+  [ $# -gt 1 ] && cmd::usage 'too many arguments'
+  local release=$1
+
+  local template
+  jail::template::release2name template "$release"
+
+  jail::template::exists "$template" && die "template already exists: ${template}"
+  jail::template::download_release "$release"
+}
+
+cmd::edit(){
+  local usage='edit JAIL'
+  local help='Edit jail configuration.'
+
+  local opt
+  while getopts :h opt; do
+    case $opt in
+      h) cmd::help ;;
+      ?) cmd::usage "unknown option: -${OPTARG}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  [ $# -lt 1 ] && cmd::usage 'JAIL not specified'
+  [ $# -gt 1 ] && cmd::usage 'too many arguments'
+
+  jail::exists "$1" || die "no such jail: ${1}"
+  "$EDITOR" "/etc/jail.conf.d/${1}.conf"
+}
+
+cmd::exec(){
+  local usage='exec JAIL COMMAND...'
+  local help='Run a command within the jail.'
+
+  local opt
+  while getopts :h opt; do
+    case $opt in
+      h) cmd::help ;;
+      ?) cmd::usage "unknown option: -${OPTARG}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  [ $# -lt 1 ] && cmd::usage 'JAIL not specified'
+  [ $# -lt 2 ] && cmd::usage 'COMMAND not specified'
+  jail=$1
+  shift
+  jail::exists "$jail" || die "no such jail: ${jail}"
+
+  jail::exec "$jail" "$@"
+}
+
+cmd::init(){
+  local usage='init'
+  local help='Initialize jails dataset.'
+
+  local opt
+  while getopts :h opt; do
+    case $opt in
+      h) cmd::help ;;
+      ?) cmd::usage "unknown option: -${OPTARG}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  [ $# -eq 0 ] || cmd::usage 'too many arguments'
+
+  jail::init
+}
+
+cmd::list(){
+  local usage='list [-t]'
+  local help='List configured jails.
+Options:
+  -t  Use terse output (jail names only)'
+
+  local file name status opt terse=false
+
+  while getopts :th opt; do
+    case $opt in
+      t) terse=true ;;
+      h) cmd::help ;;
+      ?) cmd::usage "unknown option: -${OPTARG}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  [ $# -eq 0 ] || cmd::usage 'too many arguments'
+
+  { [ $terse = true ] || echo 'JAIL STATUS'
+    for file in /etc/jail.conf.d/*.conf; do
+      [ -e "$file" ] || continue
+
+      name=${file##*/}
+      name=${name%.conf}
+
+      if [ $terse = true ]; then
+        printf '%s\n' "$name"
+      else
+        if jail::running "$name"; then
+          status=running
+        else
+          status=stopped
+        fi
+        printf '%s %s\n' "$name" "$status"
+      fi
+    done
+  } | column -t
+}
+
+cmd::list_templates(){
+  local usage='list-templates'
+  local help='List template datasets.'
+
+  local opt
+  while getopts :h opt; do
+    case $opt in
+      h) cmd::help ;;
+      ?) cmd::usage "unknown option: -${OPTARG}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  [ $# -eq 0 ] || cmd::usage 'too many arguments'
+
+  ls -1 "${JAIL_HOME}/templates"
+}
+
+cmd::start(){
+  local usage='start JAIL'
+  local help='Start a jail.'
+
+  local opt
+  while getopts :h opt; do
+    case $opt in
+      h) cmd::help ;;
+      ?) cmd::usage "unknown option: -${OPTARG}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  [ $# -lt 1 ] && cmd::usage 'JAIL not specified'
+  [ $# -gt 1 ] && cmd::usage 'too many arguments'
+
+  jail::exists "$1"  || die "no such jail: ${1}"
+  jail::running "$1" && die "jail already running: ${1}"
+
+  jail::start "$1"
+}
+
+cmd::stop(){
+  local usage='stop JAIL'
+  local help='Stop a jail.'
+
+  local opt
+  while getopts :h opt; do
+    case $opt in
+      h) cmd::help ;;
+      ?) cmd::usage "unknown option: -${OPTARG}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  [ $# -lt 1 ] && cmd::usage 'JAIL not specified'
+  [ $# -gt 1 ] && cmd::usage 'too many arguments'
+
+  jail::exists "$1"  || die "no such jail: ${1}"
+  jail::running "$1" || die "jail not running: ${1}"
+
+  jail::stop "$1"
+}
+
+cmd::restart() {
+  local usage='restart JAIL'
+  local help='Restart a jail.'
+
+  local opt
+  while getopts :h opt; do
+    case $opt in
+      h) cmd::help ;;
+      ?) cmd::usage "unknown option: -${OPTARG}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  [ $# -lt 1 ] && cmd::usage 'no jail specified'
+  [ $# -gt 1 ] && cmd::usage 'too many arguments'
+
+  jail::exists "$1"  || die "no such jail: ${1}"
+  jail::running "$1" || die "jail not running: ${1}"
+
+  jail::restart "$1"
+}
+
+cmd::shell(){
+  local usage='shell JAIL'
+  local help='Run a shell within the jail.'
+
+  local opt
+  while getopts :h opt; do
+    case $opt in
+      h) cmd::help ;;
+      ?) cmd::usage "unknown option: -${OPTARG}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  [ $# -lt 1 ] && cmd::usage 'JAIL not specified'
+  [ $# -gt 1 ] && cmd::usage 'too many arguments'
+  jail::exists "$1" || die "no such jail: ${1}"
+
+  jail::exec "$1" /bin/sh
+}
+
+cmd::show(){
+  local usage='show JAIL'
+  local help='Show jail configuration.'
+
+  local opt
+  while getopts :h opt; do
+    case $opt in
+      h) cmd::help ;;
+      ?) cmd::usage "unknown option: -${OPTARG}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  [ $# -lt 1 ] && cmd::usage 'JAIL not specified'
+  [ $# -gt 1 ] && cmd::usage 'too many arguments'
+
+  jail::exists "$1" || die "no such jail: ${1}"
+
+  printf -- '------------------------- JAIL CONFIGURATION -------------------------\n'
+  cat "/etc/jail.conf.d/${1}.conf"
+  printf -- '\n---------------------------- ZFS DATASET -----------------------------\n'
+  zfs list -r -o name,quota,used,avail,mountpoint "${JAIL_DATASET}/${1}/os" "${JAIL_DATASET}/${1}/data"
+  printf -- '\n----------------------------- SNAPSHOTS ------------------------------\n'
+  zfs list -r -t snapshot "${JAIL_DATASET}/${1}/os" "${JAIL_DATASET}/${1}/data"
+  printf -- '\n--------------------------- RESOURCE LIMITS --------------------------\n'
+  rctl -h "jail:${1}" | cut -d: -f3-
+}
+
+cmd::statistics(){
+  local usage='statistics JAIL'
+  local help='Show running jail statistics.'
+
+  local opt
+  while getopts :h opt; do
+    case $opt in
+      h) cmd::help ;;
+      ?) cmd::usage "unknown option: -${OPTARG}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  [ $# -lt 1 ] && cmd::usage 'JAIL not specified'
+  [ $# -gt 1 ] && cmd::usage 'too many arguments'
+
+  jail::exists "$1" || die "no such jail: ${1}"
+  jail::running "$1" || die "jail not running: ${1}"
+
+  printf -- '---------------------------- JAIL STATUS -----------------------------\n'
+  jls -j "$1" -h jid name path osrelease host.hostname 2>/dev/null | column -t
+  printf -- '\n---------------------------- ZFS DATASET -----------------------------\n'
+  zfs list -r -o name,quota,used,avail,mountpoint "${JAIL_DATASET}/${1}/os" "${JAIL_DATASET}/${1}/data"
+  printf -- '\n--------------------------- RESOURCE LIMITS --------------------------\n'
+  rctl -h "jail:${1}" | cut -d: -f3-
+  printf -- '\n--------------------------- RESOURCE USAGE ---------------------------\n'
+  rctl -h -u "jail:${1}" \
+    | grep -E '^(maxproc|memoryuse|openfiles|pcpu|vmemoryuse|swapuse|readbps|writebps|readiops|writeiops)=' \
+    | rs -c= -C' ' -T \
+    | column -t
+  printf -- '\n----------------------------- PROCESSES ------------------------------\n'
+  ps -auxdr -J "$1"
+}
+
+cmd::update_release(){
+  local usage='update-release TEMPLATE'
+  local help='Update a FreeBSD release template.'
+
+  local opt
+  while getopts :h opt; do
+    case $opt in
+      h) cmd::help ;;
+      ?) cmd::usage "unknown option: -${OPTARG}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  [ $# -lt 1 ] && cmd::usage 'TEMPLATE not specified'
+  [ $# -gt 1 ] && cmd::usage 'too many arguments'
+
+  jail::template::exists "$1" || die "no such template: ${1}"
+  jail::template::update_release "$1"
+}
+
+
+################################################################################
+# "Library" functions.
+################################################################################
+interface::exists(){
+  ifconfig "$1" > /dev/null 2>&1
+}
+
+jail::create(){
+  local name=$1 template=$2 devfs_ruleset=$DEFAULT_DEVFS_RULESET vnet_interface
+
+  # The following variables can be overidden by the caller:
+  local \
+    jail_bpf=${jail_bpf:-false} \
+    jail_cpulimit=${jail_cpulimit:-} \
+    jail_data_quota=${jail_data_quota:-$DEFAULT_DATA_QUOTA} \
+    jail_domain=${jail_domain:-$DEFAULT_DOMAIN} \
+    jail_interface=${jail_interface:-$DEFAULT_INTERFACE} \
+    jail_ip=${jail_ip:-} \
+    jail_memlimit=${jail_memlimit:-} \
+    jail_nameservers=${jail_nameservers:-} \
+    jail_netmask=${jail_netmask:-$DEFAULT_NETMASK} \
+    jail_os_quota=${jail_os_quota:-$DEFAULT_OS_QUOTA} \
+    jail_searchdomains=${jail_searchdomains:-}
+
+  local jail_gateway=${jail_gateway:-${jail_ip%.*}.1}
+
+  if [ "${template#*@}" = "$template" ]; then
+    local snapshot
+    snapshot=$(zfs::latest_snapshot "${JAIL_DATASET}/templates/${template}")
+    template="${template}@${snapshot}"
+  fi
+
+  vnet_interface=$(jail::name2intf "$name")
+
+  zfs create -v -o mountpoint=none "${JAIL_DATASET}/${name}"
+  zfs clone \
+    -o mountpoint="${JAIL_HOME}/${name}" \
+    -o quota="$jail_os_quota" \
+    "${JAIL_DATASET}/templates/${template}" "${JAIL_DATASET}/${name}/os"
+  zfs create -v \
+    -o mountpoint=none \
+    -o quota="$jail_data_quota" \
+    "${JAIL_DATASET}/${name}/data"
+
+  cp -v /etc/localtime "${JAIL_HOME}/${name}/etc/localtime"
+
+  # We want word-splitting here.
+  # shellcheck disable=SC2086
+  [ -n "${jail_nameservers}"   ] && printf 'nameserver %s\n' $jail_nameservers     >> "${JAIL_HOME}/${name}/etc/resolv.conf"
+  [ -n "${jail_searchdomains}" ] && printf 'search %s\n'     "$jail_searchdomains" >> "${JAIL_HOME}/${name}/etc/resolv.conf"
+
+  sysrc -v -f "${JAIL_HOME}/${name}/etc/rc.conf" \
+    "hostname=${name}.${jail_domain}" \
+    "ifconfig_e0b_${vnet_interface}_name=jail0" \
+    'ipv6_activate_all_interfaces=NO' \
+    'syslogd_flags=-ss' \
+    'sendmail_enable=NONE' \
+    'dumpdev=NO'
+
+  if [ -n "${jail_ip}" ]; then
+    sysrc -v -f "${JAIL_HOME}/${name}/etc/rc.conf" \
+      "ifconfig_jail0=inet ${jail_ip} netmask ${jail_netmask}" \
+      "defaultrouter=${jail_gateway}"
+  else
+    sysrc -v -f "${JAIL_HOME}/${name}/etc/rc.conf" "ifconfig_jail0=SYNCDHCP"
+    devfs_ruleset=$JAIL_BPF_RULESET
+  fi
+
+  [ "${jail_bpf}" = true ] && devfs_ruleset=$JAIL_BPF_RULESET
+
+  cat <<EOF > "/etc/jail.conf.d/${name}.conf"
+${name} {
+  path = "${JAIL_HOME}/\$name";
+  host.hostname = "\$name.${jail_domain}";
+
+  exec.created  = "zfs set jailed=on ${JAIL_DATASET}/\$name/data";
+  exec.created += "zfs jail \$name ${JAIL_DATASET}/\$name/data";
+  exec.start    = "zfs mount -a";
+  exec.start   += "/bin/sh /etc/rc";
+  exec.stop     = "/bin/sh /etc/rc.shutdown";
+  exec.clean;
+
+  exec.system_user = "root";
+  exec.jail_user   = "root";
+
+  mount.devfs;
+  devfs_ruleset = "${devfs_ruleset}";
+
+  allow.mount     = true;
+  allow.mount.zfs = true;
+  enforce_statfs  = 1;
+
+  vnet;
+  vnet.interface = "e0b_${vnet_interface}";
+  exec.prestart = "jib addm ${vnet_interface} ${jail_interface}";
+  exec.poststop = "jib destroy ${vnet_interface}";
+}
+EOF
+
+  [ -n "$jail_cpulimit" ] && rctl -a "jail:${name}:pcpu:deny=${jail_cpulimit}"
+  [ -n "$jail_memlimit" ] && rctl -a "jail:${name}:vmemoryuse:deny=${jail_memlimit}"
+
+  sysrc -v jail_list+="$name"
+
+  jail::start "$name"
+}
+
+jail::destroy(){
+  jail::running "$1" && jail::stop "$1"
+  rm "/etc/jail.conf.d/${1}.conf"
+  rctl -r "jail:${1}"
+  sysrc -v jail_list-="$1"
+  zfs destroy -v -r "${JAIL_DATASET}/${1}"
+}
+
+jail::exec() {
+  local jail=$1
+  shift
+  jexec -l "$jail" "$@"
+}
+
+jail::exists(){
+  test -f "/etc/jail.conf.d/${1}.conf"
+}
+
+jail::init(){
+  local release template
+
+  [ -d "$JAIL_HOME" ] || zfs create -v -o mountpoint="${JAIL_HOME}" "${JAIL_DATASET}"
+
+  release=$(uname -r)
+  jail::template::release2name template "$release"
+  jail::template::exists "$template" || jail::template::download_release "$release"
+
+  install -v -m 0555 /usr/share/examples/jails/jib /usr/local/sbin/jib
+
+  if ! grep -xq "\[.*=${JAIL_BPF_RULESET}\]" /etc/devfs.rules 2>/dev/null; then
+    cat <<EOF >> /etc/devfs.rules
+[devfsrules_jail_vnet_bpf=${JAIL_BPF_RULESET}]
+add include \$devfsrules_jail_vnet
+add path 'bpf*' unhide
+EOF
+  fi
+
+  sysrc -v jail_enable=YES jail_parallel_start=YES
+
+  if ! grep -xqF 'kern.racct.enable="1"' /boot/loader.conf; then
+    echo 'kern.racct.enable="1"' | tee -a /boot/loader.conf
+    echo 'Reboot required to enable resource accounting via RCTL!'
+  fi
+}
+
+jail::name2intf(){
+  # Usually, most people just use the jail name for the VNET interface name.
+  # However...
+  #
+  # The maximum length of a network interface name on FreeBSD appears to be
+  # 15 characters. The `jib` script, which automatically creates VNET bridges,
+  # prepends 'e0b_' to the interface name. This leaves only 11 characters for
+  # jail name. Any longer, and the you'll get SIOCSIFNAME: File name too long.
+  #
+  # Rather than write some convoluted logic for truncating the jail name and
+  # disambiguating potential clashes, let's do the dumb thing and take a chunk
+  # of the jail names SHA-1 hash :-)
+  printf '%s' "$1" | sha1 | tail -c 12
+}
+
+jail::restart(){
+  jail -v -f "/etc/jail.conf.d/${1}.conf" -rc "$1"
+}
+
+jail::running(){
+  jls -j "$1" > /dev/null 2>&1
+}
+
+jail::start(){
+  jail -v -f "/etc/jail.conf.d/${1}.conf" -c "$1"
+}
+
+jail::stop(){
+  jail -v -f "/etc/jail.conf.d/${1}.conf" -r "$1"
+}
+
+jail::template::exists(){
+  zfs list -H "${JAIL_DATASET}/templates/${1}" > /dev/null 2>&1
+}
+
+jail::template::download_release(){
+  local release=$1 arch base_tarball template
+
+  arch=$(uname -p)
+  base_tarball="https://download.freebsd.org/releases/${arch}/${release}/base.txz"
+
+  jail::template::release2name template "$release"
+
+  zfs create -v -p "${JAIL_DATASET}/templates/${template}"
+
+  if ! fetch "$base_tarball" -o - | tar xzf - -C "${JAIL_HOME}/templates/${template}"; then
+    zfs destroy -v "${JAIL_DATASET}/templates/${template}"
+    die "failed to extract base tarball for ${release}"
+  fi
+
+  jail::template::update_release "$template"
+}
+
+jail::template::release2name(){
+  setvar "$1" "freebsd${2%.*}"
+}
+
+jail::template::update_release(){
+  local template=$1 snapshot
+
+  PAGER=/bin/cat freebsd-update -b "${JAIL_HOME}/templates/${template}" --not-running-from-cron fetch install
+
+  snapshot=$("${JAIL_HOME}/templates/${template}/bin/freebsd-version")
+  jail::template::exists "${template}@${snapshot}" || zfs snapshot "${JAIL_DATASET}/templates/${template}@${snapshot}"
+}
+
+
+zfs::latest_snapshot(){
+  zfs list -t snapshot -o name -s creation -H "$1" | tail -1 | cut -d@ -f2
+}
+
+
+cmd::main "$@"
