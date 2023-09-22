@@ -701,7 +701,7 @@ jail::name2intf(){
   #
   # Rather than write some convoluted logic for truncating the jail name and
   # disambiguating potential clashes, let's do the dumb thing and take a chunk
-  # of the jail names SHA-1 hash :-)
+  # of the jail name's SHA-1 hash :-)
   printf '%s' "$1" | sha1 | tail -c 12
 }
 
