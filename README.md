@@ -54,7 +54,10 @@ Let's create a new jail based on the template. The jail will be bridged to the
 physical network interface `em0`. Since we don't specify an IP address, DHCP
 will be used.
 
-    $ jailctl create -i em0 test1 freebsd13
+If you specify an SSH key with `-k`, it will be added to root's `authorized_keys`
+file.
+
+    $ jailctl create -i em0 -k ~/mykey.pub test1 freebsd13
 
 Our `test1` jail should now be running:
 
@@ -62,16 +65,21 @@ Our `test1` jail should now be running:
     JAIL   STATUS
     test1  running
 
-We can run a command within the jail using `jailctl exec`:
-
-    $ jailctl exec test1 uname -a
-    FreeBSD test1.example.com 13.2-RELEASE FreeBSD 13.2-RELEASE releng/13.2-n254617-525ecfdad597 GENERIC amd64
-
-Or get a shell within the jail using `jailctl shell`:
+We can get shell within the jail using `jailctl shell`:
 
     $ jailctl shell test1
     # echo "I'm in jail: $(hostname)"
     I'm in jail: test1.example.com
+
+Or run a command within the jail using `jailctl exec`:
+
+    $ jailctl exec test1 ifconfig jail0 | grep inet
+    inet 10.11.199.109 netmask 0xffffff00 broadcast 10.11.199.255
+
+We can SSH into the jail using the public key we specified earlier:
+
+    $ ssh -i ~/mykey root@10.11.199.109
+    root@test1:~ # back in jail!
 
 Let's create another jail, this time with a static IP and resource limits. We'll
 use a ZFS quota of 128 GB, a memory limit of 4 GB, and a CPU limit of 400.

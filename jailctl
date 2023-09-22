@@ -130,7 +130,7 @@ cmd::usage(){
 
 cmd::create(){
   local usage='create [-a IP] [-b] [-c CPULIMIT] [-d DOMAIN] [-g GATEWAY] [-i INTERFACE]
-        [-m MEMLIMIT] [-n NETMASK] [-q QUOTA] [-Q OS_QUOTA] [-r NAMESERVER]
+        [-k SSHKEY] [-m MEMLIMIT] [-n NETMASK] [-q QUOTA] [-Q OS_QUOTA] [-r NAMESERVER]
         [-s SEARCHDOMAIN] NAME TEMPLATE'
   local help="Create a new jail.
 Options:
@@ -140,6 +140,7 @@ Options:
   -d DOMAIN        Host domain name
   -g GATEWAY       Default IPv4 gateway.
   -i INTERFACE     Host network interface to bridge
+  -k SSHKEY        Path to SSH pubkey for root's authorized_keys
   -m MEMLIMIT      Virtual memory limit
   -n NETMASK       IPv4 netmask
   -q QUOTA         Quota for delegated dataset
@@ -160,7 +161,7 @@ Options:
     jail_searchdomains
 
   local opt
-  while getopts :a:bc:d:g:hi:m:n:q:Q:r:s: opt; do
+  while getopts :a:bc:d:g:hi:k:m:n:q:Q:r:s: opt; do
     case $opt in
       a) jail_ip=$OPTARG ;;
       b) jail_bpf=true ;;
@@ -169,6 +170,7 @@ Options:
       g) jail_gateway=$OPTARG ;;
       h) cmd::help ;;
       i) jail_interface=$OPTARG ;;
+      k) jail_sshkey=$OPTARG ;;
       m) jail_memlimit=$OPTARG ;;
       n) jail_netmask=$OPTARG ;;
       q) jail_data_quota=$OPTARG ;;
@@ -560,7 +562,8 @@ jail::create(){
     jail_nameservers=${jail_nameservers:-} \
     jail_netmask=${jail_netmask:-$DEFAULT_NETMASK} \
     jail_os_quota=${jail_os_quota:-$DEFAULT_OS_QUOTA} \
-    jail_searchdomains=${jail_searchdomains:-}
+    jail_searchdomains=${jail_searchdomains:-} \
+    jail_sshkey=${jail_sshkey:-}
 
   local jail_gateway=${jail_gateway:-${jail_ip%.*}.1}
 
@@ -604,6 +607,13 @@ jail::create(){
   else
     sysrc -v -f "${JAIL_HOME}/${name}/etc/rc.conf" "ifconfig_jail0=SYNCDHCP"
     devfs_ruleset=$JAIL_BPF_RULESET
+  fi
+
+  if [ -f "$jail_sshkey" ]; then
+    echo "PermitRootLogin prohibit-password" | tee -a "${JAIL_HOME}/${name}/etc/ssh/sshd_config"
+    sysrc -v -f "${JAIL_HOME}/${name}/etc/rc.conf" 'sshd_enable=YES'
+    install -v -d -m 0700 "${JAIL_HOME}/${name}/root/.ssh"
+    install -v -m 0600 "$jail_sshkey" "${JAIL_HOME}/${name}/root/.ssh/authorized_keys"
   fi
 
   [ "${jail_bpf}" = true ] && devfs_ruleset=$JAIL_BPF_RULESET
