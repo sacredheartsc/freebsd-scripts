@@ -45,6 +45,7 @@ Commands:
   init                Initialize the jail dataset
   list|ls             List configured jails
   list-templates|lst  List available templates
+  reprovision         Wipe and reprovision an OS dataset from template
   restart             Restart a jail
   shell|sh            Run a shell within the jail
   show                Show jail configuration
@@ -420,12 +421,13 @@ cmd::stop(){
 
 cmd::reprovision(){
   local usage='reprovision JAIL TEMPLATE'
-  local help="Reprovision a jail's OS dataset from a template."
+  local help="Wipe and reprovision a jail's OS dataset from a template."
 
-  local opt
-  while getopts :h opt; do
+  local opt noconfirm=false
+  while getopts :hy opt; do
     case $opt in
       h) cmd::help ;;
+      y) noconfirm=true ;;
       ?) cmd::usage "unknown option: -${OPTARG}" ;;
     esac
   done
@@ -438,6 +440,14 @@ cmd::reprovision(){
 
   jail::exists "$jail"               || die "no such jail: ${jail}"
   jail::template::exists "$template" || die "no such template: ${template}"
+
+  if [ "$noconfirm" != true ]; then
+    read -rp "Really reprovision ${jail}? (y/N) " answer
+    case $answer in
+      [yY]|[yY][eE][sS]) : ;;
+      *) die 'operation cancelled' ;;
+    esac
+  fi
 
   jail::running "$jail" && jail::stop "$jail"
   jail::reprovision "$jail" "$template"
