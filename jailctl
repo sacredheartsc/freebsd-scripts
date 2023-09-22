@@ -1,5 +1,6 @@
 #!/bin/sh
 
+# -----------------------------------------------------------------------------
 # BSD 2-Clause License
 #
 # Copyright (c) 2023, stonewall (stonewall@sacredheartsc.com)
@@ -24,83 +25,8 @@
 # CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#
 # -----------------------------------------------------------------------------
-#
 #                                    JMJ
-#
-# This script is a thin wrapper around various jail(8), zfs(8), and rctl(8)
-# commands used to manage my jail-based virtualization platform on FreeBSD.
-#
-# This is not a general-purpose tool. It is tailored to my opinionated methods
-# for managing jails. Specifically:
-#
-#   - Everything uses ZFS.
-#
-#   - Every jail is a thick VNET jail.
-#
-#   - There is *zero* IPv6 support.
-#
-#   - All jails are started automatically on boot.
-#
-#   - Each jail's configuration lives at /etc/jails.conf.d/$jailname.conf.
-#
-#   - Jail resource limits are managed by rctl(8).
-#
-#   - Each jail gets two ZFS datasets: $jail/os and $jail/data.
-#
-#   - The 'os' dataset contains the root filesystem. It is cloned from a ZFS
-#     template and is managed by the host.
-#
-#   - The 'data' dataset contains arbitrary data. It is delegated to the jail
-#     and managed from within the jail itself.
-#
-#     This allows us to wipe and reprovision the OS from a fresh template,
-#     while leaving application data intact.
-#
-# This tool does not touch your networking configuration, other than to create
-# an epair(4) virtual ethernet device for each running jail. If you need
-# bridges, LAGGs, or VLAN interfaces, you'll have to configure those yourself.
-#
-# If you specify an IP address, it will be configured statically in the jail's
-# /etc/rc.conf. Otherwise, the jail will use DHCP.
-#
-# To prepare your host for jailctl-managed jails, run `jailctl init`. This will
-# create the jail dataset. You may need to reboot your host to enable resource
-# accounting via RCTL.
-#
-#      TLDR:
-#
-# Install jailctl:
-#
-#   $ install -m 0555 jailctl /usr/local/sbin/jailctl
-#
-# Initialize the jail dataset and write necessary config files:
-#
-#   $ jailctl init
-#
-# A template dataset with a FreeBSD rootfs was automatically created:
-#
-#   $ jailctl list-templates
-#     freebsd13
-#
-# Create a new jail with DHCP:
-#
-#   $ jailctl create -i em0 myjail1 freebsd13
-#
-# A more complex example, using a static IP (10.11.199.17) and resource limits
-# (max 400% CPU utilization, max 4GB RAM, and 128GB disk quota):
-#
-#   $ jailctl create \
-#      -i em0 \
-#      -a 10.11.199.17 -n 255.255.255.0 -g 10.11.199.1 \
-#      -r 8.8.8.8 -r 8.8.4.4 \
-#      -s sub.example.com -s example.com \
-#      -c 400 -m 4G -q 128G
-#      myjail2 freebsd13
-#
-# -----------------------------------------------------------------------------
-
 
 # Shellcheck doesn't support FreeBSD's /bin/sh, but we can get pretty close:
 # shellcheck shell=dash disable=SC3033

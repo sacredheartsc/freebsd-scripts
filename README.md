@@ -17,26 +17,28 @@ for managing jails. Specifically:
 
 - All jails are started automatically on boot.
 
-- Each jail's configuration lives at /etc/jails.conf.d/$jailname.conf.
+- Each jail's configuration lives at `/etc/jails.conf.d/$jailname.conf`.
 
 - Jail resource limits are managed by `rctl(8)`.
 
 - Each jail gets two ZFS datasets: `$jail/os` and `$jail/data`.
 
-- The 'os' dataset contains the root filesystem. It is cloned from a ZFS
+- The `os` dataset contains the root filesystem. It is cloned from a ZFS
   template and is managed by the host.
 
-- The 'data' dataset contains arbitrary data. It is delegated to the jail
-  and managed from within the jail itself.
-
-  This allows us to wipe and reprovision the OS from a fresh template,
-  while leaving application data intact.
+- The `data` dataset contains arbitrary data. It is delegated to the jail
+  and managed from within the jail itself. This allows us to wipe and reprovision
+  the OS from a fresh template, while leaving application data intact.
 
 This tool does not touch your networking configuration, other than to create
-an epair(4) virtual ethernet device for each running jail. If you need
+an `epair(4)` virtual ethernet device for each running jail. If you need
 bridges, LAGGs, or VLAN interfaces, you'll have to configure those yourself.
 
 ### Usage
+
+First, install `jailctl`:
+
+    $ install -m 0555 jailctl /usr/local/sbin/jailctl
 
 Initialize the jail dataset:
 
