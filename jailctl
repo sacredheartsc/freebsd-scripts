@@ -756,7 +756,6 @@ jail::template::update_release(){
   jail::template::exists "${template}@${snapshot}" || zfs snapshot "${JAIL_DATASET}/templates/${template}@${snapshot}"
 }
 
-
 zfs::latest_snapshot(){
   zfs list -t snapshot -o name -s creation -H "$1" | tail -1 | cut -d@ -f2
 }
