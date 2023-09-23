@@ -37,22 +37,26 @@ set -eu -o pipefail
 cmd::main(){
   local usage="COMMAND [ARGS]...
 Commands:
-  create              Create a new jail
-  destroy             Delete a jail and its dataset
-  download-release    Download and create a FreeBSD release template
-  edit                Edit a jail's configuration
-  exec                Run a command within the jail
-  init                Initialize the jail dataset
-  list|ls             List configured jails
-  list-templates|lst  List available templates
-  reprovision         Wipe and reprovision an OS dataset from template
-  restart             Restart a jail
-  shell|sh            Run a shell within the jail
-  show                Show jail configuration
-  statistics|stat     Show running jail statistics
-  start               Start a jail
-  stop                Stop a jail
-  update-release      Update a FreeBSD release template"
+  create                Create a new jail
+  create-snapshot|snap  Take a snapshot of a jail
+  destroy|rm            Delete a jail and its dataset
+  destroy-snapshot|rms  Delete a jail snapshot
+  destroy-template|rmt  Delete a template
+  download-release      Download and create a FreeBSD release template
+  edit                  Edit a jail's configuration
+  exec                  Run a command within the jail
+  init                  Initialize the jail dataset
+  list|ls               List configured jails
+  list-snapshots|lss    List jail snapshots
+  list-templates|lst    List available templates
+  reprovision           Wipe and reprovision an OS dataset from template
+  restart               Restart a jail
+  shell|sh              Run a shell within the jail
+  show                  Show jail configuration
+  statistics|stat       Show running jail statistics
+  start                 Start a jail
+  stop                  Stop a jail
+  update-release        Update a FreeBSD release template"
 
   while getopts :h opt; do
     case $opt in
@@ -67,23 +71,27 @@ Commands:
   shift
 
   case $cmd in
-    create)             cmd::create "$@" ;;
-    destroy)            cmd::destroy "$@" ;;
-    download-release)   cmd::download_release "$@" ;;
-    edit)               cmd::edit "$@" ;;
-    exec)               cmd::exec "$@" ;;
-    init)               cmd::init "$@" ;;
-    list|ls)            cmd::list "$@" ;;
-    list-templates|lst) cmd::list_templates "$@" ;;
-    reprovision)        cmd::reprovision "$@" ;;
-    restart)            cmd::restart "$@" ;;
-    shell|sh)           cmd::shell "$@" ;;
-    show)               cmd::show "$@" ;;
-    start)              cmd::start "$@" ;;
-    statistics|stat)    cmd::statistics "$@" ;;
-    stop)               cmd::stop "$@" ;;
-    update-release)     cmd::update_release "$@" ;;
-    *)                  cmd::usage "unknown command: ${cmd}" ;;
+    create)               cmd::create "$@" ;;
+    create-snapshot|snap) cmd::create_snapshot "$@" ;;
+    destroy-snapshot|rms) cmd::destroy_snapshot "$@" ;;
+    destroy-template|rmt) cmd::destroy_template "$@" ;;
+    destroy|rm)           cmd::destroy "$@" ;;
+    download-release)     cmd::download_release "$@" ;;
+    edit)                 cmd::edit "$@" ;;
+    exec)                 cmd::exec "$@" ;;
+    init)                 cmd::init "$@" ;;
+    list|ls)              cmd::list "$@" ;;
+    list-snapshots|lss)   cmd::list_snapshots "$@" ;;
+    list-templates|lst)   cmd::list_templates "$@" ;;
+    reprovision)          cmd::reprovision "$@" ;;
+    restart)              cmd::restart "$@" ;;
+    shell|sh)             cmd::shell "$@" ;;
+    show)                 cmd::show "$@" ;;
+    start)                cmd::start "$@" ;;
+    statistics|stat)      cmd::statistics "$@" ;;
+    stop)                 cmd::stop "$@" ;;
+    update-release)       cmd::update_release "$@" ;;
+    *)                    cmd::usage "unknown command: ${cmd}" ;;
   esac
 }
 
@@ -198,6 +206,132 @@ Options:
   jail::start "$name"
 }
 
+cmd::create_snapshot(){
+  local usage='create-snapshot [-d] [-o] JAIL [SNAPNAME]'
+  local help='Create a jail snapshot.
+Options:
+  -d  Only snapshot the data dataset
+  -o  Only snapshot the OS dataset'
+
+  local opt os_only=false data_only=false snapname
+  while getopts :dho opt; do
+    case $opt in
+      d) data_only=true ;;
+      h) cmd::help ;;
+      o) os_only=true ;;
+      ?) cmd::usage "unknown option: -${OPTARG}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  [ $# -lt 1 ] && cmd::usage 'JAIL not specified'
+  [ $# -gt 2 ] && cmd::usage 'too many arguments'
+  jail=$1 snapname=${2:-}
+
+  [ -n "$snapname" ] || snapname=$(date +%Y-%m-%dT%H:%M:%S)
+
+  if [ "$data_only" = true ] && [ "$os_only" = true ]; then
+    zfs snapshot \
+      "${JAIL_DATASET}/${jail}/os@${snapname}" \
+      "${JAIL_DATASET}/${jail}/data@${snapname}"
+  elif [ "$data_only" = false ] && [ "$os_only" = false ]; then
+    zfs snapshot \
+      "${JAIL_DATASET}/${jail}/os@${snapname}" \
+      "${JAIL_DATASET}/${jail}/data@${snapname}"
+  elif [ "$os_only" = true ]; then
+    zfs snapshot "${JAIL_DATASET}/${jail}/os@${snapname}"
+  elif [ "$data_only" = true ]; then
+    zfs snapshot "${JAIL_DATASET}/${jail}/data@${snapname}"
+  fi
+}
+
+cmd::destroy_snapshot(){
+  local usage='destroy-snapshot [-y] JAIL SNAPSHOT'
+  local help="Delete a jail snapshot
+Options:
+  -y  Don't prompt for confirmation"
+
+  local noconfirm=false answer opt
+
+  while getopts :hy opt; do
+    case $opt in
+      h) cmd::help ;;
+      y) noconfirm=true ;;
+      ?) cmd::usage "unknown option: -${OPTARG}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  [ $# -lt 1 ] && cmd::usage 'JAIL not specified'
+  [ $# -lt 2 ] && cmd::usage 'SNAPSHOT not specified'
+  [ $# -gt 2 ] && cmd::usage 'too many arguments'
+  local jail=$1 snapshot=$2
+
+  jail::exists "$jail" || die "no such jail: ${jail}"
+
+  local datasets=''
+
+  if [ "${snapshot#*@}" != "$snapshot" ]; then
+    zfs::dataset_exists "${JAIL_DATASET}/${jail}/${snapshot}" && \
+      datasets="${JAIL_DATASET}/${jail}/${snapshot}"
+  else
+    zfs::dataset_exists "${JAIL_DATASET}/${jail}/os@${snapshot}" && \
+      datasets="${JAIL_DATASET}/${jail}/os@${snapshot}"
+    zfs::dataset_exists "${JAIL_DATASET}/${jail}/data@${snapshot}" && \
+      datasets="${datasets} ${JAIL_DATASET}/${jail}/data@${snapshot}"
+  fi
+
+  [ -n "$datasets" ] || die "no such snapshot for jail ${jail}: ${snapshot}"
+
+  if [ "$noconfirm" != true ]; then
+    read -rp "Really delete ${jail} snapshot ${snapshot}? (y/N) " answer
+    case $answer in
+      [yY]|[yY][eE][sS]) : ;;
+      *) die 'operation cancelled' ;;
+    esac
+  fi
+
+  local dataset
+  # shellcheck disable=SC2086
+  for dataset in $datasets; do
+    zfs destroy -v "$dataset"
+  done
+}
+
+cmd::destroy_template(){
+  local usage='destroy-template [-y] TEMPLATE'
+  local help="Delete a jail template.
+Options:
+  -y  Don't prompt for confirmation
+Note that you cannot delete a template if any clones still exist."
+
+  local noconfirm=false answer opt
+
+  while getopts :hy opt; do
+    case $opt in
+      h) cmd::help ;;
+      y) noconfirm=true ;;
+      ?) cmd::usage "unknown option: -${OPTARG}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  [ $# -lt 1 ] && cmd::usage 'TEMPLATE not specified'
+  [ $# -gt 1 ] && cmd::usage 'too many arguments'
+
+  jail::template::exists "$1" || die "no such template: ${1}"
+
+  if [ "$noconfirm" != true ]; then
+    read -rp "Really delete template ${1}? (y/N) " answer
+    case $answer in
+      [yY]|[yY][eE][sS]) : ;;
+      *) die 'operation cancelled' ;;
+    esac
+  fi
+
+  zfs destroy -v -r "${JAIL_DATASET}/templates/${1}"
+}
+
 cmd::destroy(){
   local usage='destroy [-y] JAIL'
   local help="Delete a jail and its dataset.
@@ -222,7 +356,7 @@ Options:
   jail::exists "$jail" || die "no such jail: ${jail}"
 
   if [ "$noconfirm" != true ]; then
-    read -rp "Really delete ${jail}? (y/N) " answer
+    read -rp "Really delete jail ${jail}? (y/N) " answer
     case $answer in
       [yY]|[yY][eE][sS]) : ;;
       *) die 'operation cancelled' ;;
@@ -359,7 +493,7 @@ Options:
 
 cmd::list_templates(){
   local usage='list-templates'
-  local help='List template datasets.'
+  local help='list template datasets.'
 
   local opt
   while getopts :h opt; do
@@ -373,6 +507,38 @@ cmd::list_templates(){
   [ $# -eq 0 ] || cmd::usage 'too many arguments'
 
   ls -1 "${JAIL_HOME}/templates"
+}
+
+cmd::list_snapshots(){
+  local usage='list-snapshots JAIL'
+  local help='List jail snapshots
+Options:
+  -d  List snapshots from data dataset only
+  -o  List snapshots from OS dataset only
+  -t  Use terse output'
+
+  local opt zfs_args='-o name,used,refer' dataset=''
+  while getopts :dhot opt; do
+    case $opt in
+      d) dataset='/data' ;;
+      h) cmd::help ;;
+      o) dataset='/os' ;;
+      t) zfs_args='-H -o name' ;;
+      ?) cmd::usage "unknown option: -${OPTARG}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  [ $# -lt 1 ] && cmd::usage 'JAIL not specified'
+  [ $# -gt 1 ] && cmd::usage 'too many arguments'
+
+  jail::exists "$1" || die "no such jail: ${1}"
+
+  # shellcheck disable=SC2086
+  zfs list -r -t snapshot $zfs_args -s creation "${JAIL_DATASET}/${1}${dataset}" 2>/dev/null \
+    | sed 's/^.*\///' \
+    | sort -k1,1 -t@ -s \
+    | column -t
 }
 
 cmd::start(){
@@ -871,6 +1037,10 @@ zfs::ensure_snapshot(){
     zfs list -t snapshot -H "$dataset" > /dev/null 2>&1 || die "no such snapshot: ${dataset}"
     setvar "$upvar" "$dataset"
   fi
+}
+
+zfs::dataset_exists(){
+  zfs list "$1" > /dev/null 2>&1
 }
 
 
