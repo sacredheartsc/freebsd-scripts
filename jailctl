@@ -835,6 +835,7 @@ jail::create(){
     -o mountpoint="${JAIL_HOME}/${name}" \
     -o quota="$jail_os_quota" \
     "$snapshot" "${JAIL_DATASET}/${name}/os"
+  chmod 700 "${JAIL_HOME}/${name}"
 
   # create delegated dataset
   zfs create -v \
@@ -944,6 +945,7 @@ jail::init(){
   local release template
 
   [ -d "$JAIL_HOME" ] || zfs create -v -o mountpoint="${JAIL_HOME}" "${JAIL_DATASET}"
+  chmod 700 "$JAIL_HOME"
 
   release=$(uname -r)
   jail::template::release2name template "$release"
