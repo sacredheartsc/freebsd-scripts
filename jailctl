@@ -72,28 +72,28 @@ Commands:
   shift
 
   case $cmd in
-    create)               cmd::create "$@" ;;
-    create-snapshot|snap) cmd::create_snapshot "$@" ;;
-    destroy-snapshot|rms) cmd::destroy_snapshot "$@" ;;
-    destroy-template|rmt) cmd::destroy_template "$@" ;;
-    destroy|rm)           cmd::destroy "$@" ;;
-    download-release)     cmd::download_release "$@" ;;
-    edit)                 cmd::edit "$@" ;;
-    exec)                 cmd::exec "$@" ;;
-    init)                 cmd::init "$@" ;;
-    list|ls)              cmd::list "$@" ;;
-    list-snapshots|lss)   cmd::list_snapshots "$@" ;;
-    list-templates|lst)   cmd::list_templates "$@" ;;
-    reprovision)          cmd::reprovision "$@" ;;
-    restart)              cmd::restart "$@" ;;
-    rollback)             cmd::rollback "$@" ;;
-    shell|sh)             cmd::shell "$@" ;;
-    show)                 cmd::show "$@" ;;
-    start)                cmd::start "$@" ;;
-    statistics|stat)      cmd::statistics "$@" ;;
-    stop)                 cmd::stop "$@" ;;
-    update-release)       cmd::update_release "$@" ;;
-    *)                    cmd::usage "unknown command: ${cmd}" ;;
+    create)                cmd::create "$@" ;;
+    create-snapshot|snap)  cmd::create_snapshot "$@" ;;
+    destroy-snapshot|rms)  cmd::destroy_snapshot "$@" ;;
+    destroy-template|rmt)  cmd::destroy_template "$@" ;;
+    destroy|rm)            cmd::destroy "$@" ;;
+    download-release)      cmd::download_release "$@" ;;
+    edit)                  cmd::edit "$@" ;;
+    exec)                  cmd::exec "$@" ;;
+    init)                  cmd::init "$@" ;;
+    list|ls)               cmd::list "$@" ;;
+    list-snapshots|lss)    cmd::list_snapshots "$@" ;;
+    list-templates|lst)    cmd::list_templates "$@" ;;
+    reprovision)           cmd::reprovision "$@" ;;
+    restart)               cmd::restart "$@" ;;
+    rollback)              cmd::rollback "$@" ;;
+    shell|sh)              cmd::shell "$@" ;;
+    show)                  cmd::show "$@" ;;
+    start)                 cmd::start "$@" ;;
+    statistics|stats|stat) cmd::statistics "$@" ;;
+    stop)                  cmd::stop "$@" ;;
+    update-release)        cmd::update_release "$@" ;;
+    *)                     cmd::usage "unknown command: ${cmd}" ;;
   esac
 }
 
@@ -737,11 +737,9 @@ cmd::show(){
   printf -- '------------------------- JAIL CONFIGURATION -------------------------\n'
   cat "/etc/jail.conf.d/${1}.conf"
   printf -- '\n---------------------------- ZFS DATASET -----------------------------\n'
-  zfs list -r -o name,quota,used,avail,mountpoint \
+  zfs list -o name,quota,used,avail,mountpoint -S name \
     "${JAIL_DATASET}/${1}/os" \
-    "${JAIL_DATASET}/${1}/data" \
-    | sed "s|^${JAIL_DATASET}/${1}/||" \
-    | column -t
+    "${JAIL_DATASET}/${1}/data"
   printf -- '\n--------------------------- RESOURCE LIMITS --------------------------\n'
   rctl -h "jail:${1}" | cut -d: -f3-
 }
@@ -768,9 +766,11 @@ cmd::statistics(){
   printf -- '---------------------------- JAIL STATUS -----------------------------\n'
   jls -j "$1" -h jid name path osrelease host.hostname 2>/dev/null | column -t
   printf -- '\n---------------------------- ZFS DATASET -----------------------------\n'
-  zfs list -r -o name,quota,used,avail,mountpoint "${JAIL_DATASET}/${1}/os" "${JAIL_DATASET}/${1}/data"
-  printf -- '\n--------------------------- RESOURCE LIMITS --------------------------\n'
-  rctl -h "jail:${1}" | cut -d: -f3-
+  zfs list -o name,quota,used,avail,mountpoint -S name \
+    "${JAIL_DATASET}/${1}/os" \
+    "${JAIL_DATASET}/${1}/data" \
+    | sed "s|^${JAIL_DATASET}/${1}/||" \
+    | column -t
   printf -- '\n--------------------------- RESOURCE USAGE ---------------------------\n'
   rctl -h -u "jail:${1}" \
     | grep -E '^(maxproc|memoryuse|openfiles|pcpu|vmemoryuse|swapuse|readbps|writebps|readiops|writeiops)=' \
