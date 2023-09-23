@@ -51,6 +51,7 @@ Commands:
   list-templates|lst    List available templates
   reprovision           Wipe and reprovision an OS dataset from template
   restart               Restart a jail
+  rollback              Rollback a jail to a given snapshot
   shell|sh              Run a shell within the jail
   show                  Show jail configuration
   statistics|stat       Show running jail statistics
@@ -85,6 +86,7 @@ Commands:
     list-templates|lst)   cmd::list_templates "$@" ;;
     reprovision)          cmd::reprovision "$@" ;;
     restart)              cmd::restart "$@" ;;
+    rollback)             cmd::rollback "$@" ;;
     shell|sh)             cmd::shell "$@" ;;
     show)                 cmd::show "$@" ;;
     start)                cmd::start "$@" ;;
@@ -213,12 +215,12 @@ Options:
   -d  Only snapshot the data dataset
   -o  Only snapshot the OS dataset'
 
-  local opt os_only=false data_only=false snapname
+  local opt both=true os_only=false data_only=false snapname
   while getopts :dho opt; do
     case $opt in
-      d) data_only=true ;;
+      d) data_only=true; both=false ;;
       h) cmd::help ;;
-      o) os_only=true ;;
+      o) os_only=true; both=false ;;
       ?) cmd::usage "unknown option: -${OPTARG}" ;;
     esac
   done
@@ -228,19 +230,14 @@ Options:
   [ $# -gt 2 ] && cmd::usage 'too many arguments'
   jail=$1 snapname=${2:-}
 
+  jail::exists "$jail" || die "no such jail: ${jail}"
+
   [ -n "$snapname" ] || snapname=$(date +%Y-%m-%dT%H:%M:%S)
 
-  if [ "$data_only" = true ] && [ "$os_only" = true ]; then
-    zfs snapshot \
-      "${JAIL_DATASET}/${jail}/os@${snapname}" \
-      "${JAIL_DATASET}/${jail}/data@${snapname}"
-  elif [ "$data_only" = false ] && [ "$os_only" = false ]; then
-    zfs snapshot \
-      "${JAIL_DATASET}/${jail}/os@${snapname}" \
-      "${JAIL_DATASET}/${jail}/data@${snapname}"
-  elif [ "$os_only" = true ]; then
+  if [ "$both" = true ] || [ "$os_only" = true ]; then
     zfs snapshot "${JAIL_DATASET}/${jail}/os@${snapname}"
-  elif [ "$data_only" = true ]; then
+  fi
+  if [ "$both" = true ] || [ "$data_only" = true ]; then
     zfs snapshot "${JAIL_DATASET}/${jail}/data@${snapname}"
   fi
 }
@@ -303,7 +300,7 @@ cmd::destroy_template(){
   local help="Delete a jail template.
 Options:
   -y  Don't prompt for confirmation
-Note that you cannot delete a template if any clones still exist."
+Note: a template cannot be deleted while its clones still exist."
 
   local noconfirm=false answer opt
 
@@ -517,13 +514,13 @@ Options:
   -o  List snapshots from OS dataset only
   -t  Use terse output'
 
-  local opt zfs_args='-o name,used,refer' dataset=''
+  local opt terse=false dataset=''
   while getopts :dhot opt; do
     case $opt in
       d) dataset='/data' ;;
       h) cmd::help ;;
       o) dataset='/os' ;;
-      t) zfs_args='-H -o name' ;;
+      t) terse=true ;;
       ?) cmd::usage "unknown option: -${OPTARG}" ;;
     esac
   done
@@ -534,11 +531,66 @@ Options:
 
   jail::exists "$1" || die "no such jail: ${1}"
 
-  # shellcheck disable=SC2086
-  zfs list -r -t snapshot $zfs_args -s creation "${JAIL_DATASET}/${1}${dataset}" 2>/dev/null \
-    | sed 's/^.*\///' \
-    | sort -k1,1 -t@ -s \
-    | column -t
+  if [ "$terse" = true ]; then
+    zfs list -r -t snapshot -H -o name -s creation "${JAIL_DATASET}/${1}${dataset}" 2>/dev/null \
+      | sed 's/^.*\///' \
+      | sort -k1,1 -t@ -s
+  else
+    { echo 'DATASET SNAPSHOT USED REFER'
+      zfs list -r -t snapshot -H -o name,used,refer -s creation "${JAIL_DATASET}/${1}${dataset}" 2>/dev/null
+    } | sed 's/^.*\///' \
+      | sort -k1,1 -t@ -s \
+      | tr '@' ' ' \
+      | column -t
+  fi
+}
+
+cmd::rollback(){
+  local usage='rollback JAIL SNAPSHOT'
+  local help='Rollback a jail to a given snapshot.
+Options:
+  -d  Rollback the data dataset only
+  -f  Attempt rollback even if the jail is running
+  -o  Rollback the OS dataset only'
+
+  local opt force=false both=true os_only=false data_only=false
+  while getopts :dfho opt; do
+    case $opt in
+      d) data_only=true; both=false ;;
+      f) force=true ;;
+      h) cmd::help ;;
+      o) os_only=true; both=false ;;
+      ?) cmd::usage "unknown option: -${OPTARG}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  [ $# -lt 1 ] && cmd::usage 'JAIL not specified'
+  [ $# -lt 2 ] && cmd::usage 'SNAPSHOT not specified'
+  [ $# -gt 2 ] && cmd::usage 'too many arguments'
+  local jail=$1 snapshot=$2
+
+  jail::exists "$jail" || die "no such jail: ${jail}"
+
+  if [ "$both" = true ] || [ "$os_only" = true ]; then
+    zfs::dataset_exists "${JAIL_DATASET}/${jail}/os@${snapshot}" \
+      || die "no such snapshot for ${jail}/os: ${snapshot}"
+  fi
+  if [ "$both" = true ] || [ "$data_only" = true ]; then
+    zfs::dataset_exists "${JAIL_DATASET}/${jail}/data@${snapshot}" \
+      || die "no such snapshot for ${jail}/data: ${snapshot}"
+  fi
+
+  if jail::running "$jail" && [ "$force" != true ]; then
+    die "jail ${jail} is running, refusing to rollback (-f to override)"
+  fi
+
+  if [ "$both" = true ] || [ "$os_only" = true ]; then
+    zfs rollback -r "${JAIL_DATASET}/${jail}/os@${snapshot}"
+  fi
+  if [ "$both" = true ] || [ "$data_only" = true ]; then
+    zfs rollback -r "${JAIL_DATASET}/${jail}/data@${snapshot}"
+  fi
 }
 
 cmd::start(){
