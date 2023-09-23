@@ -39,6 +39,7 @@ cmd::main(){
 Commands:
   create                Create a new jail
   create-snapshot|snap  Take a snapshot of a jail
+  create-template       Create a template from a jail
   destroy|rm            Delete a jail and its dataset
   destroy-snapshot|rms  Delete a jail snapshot
   destroy-template|rmt  Delete a template
@@ -74,6 +75,7 @@ Commands:
   case $cmd in
     create)                cmd::create "$@" ;;
     create-snapshot|snap)  cmd::create_snapshot "$@" ;;
+    create-template)       cmd::create_template "$@" ;;
     destroy-snapshot|rms)  cmd::destroy_snapshot "$@" ;;
     destroy-template|rmt)  cmd::destroy_template "$@" ;;
     destroy|rm)            cmd::destroy "$@" ;;
@@ -240,6 +242,34 @@ Options:
   if [ "$both" = true ] || [ "$data_only" = true ]; then
     zfs snapshot "${JAIL_DATASET}/${jail}/data@${snapname}"
   fi
+}
+
+cmd::create_template(){
+  local usage='create-template NAME JAIL'
+  local help='Create a template from a jail.'
+
+  local opt
+  while getopts :h opt; do
+    case $opt in
+      h) cmd::help ;;
+      ?) cmd::usage "unknown option: -${OPTARG}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  [ $# -lt 1 ] && cmd::usage 'NAME not specified'
+  [ $# -lt 2 ] && cmd::usage 'JAIL not specified'
+  [ $# -gt 2 ] && cmd::usage 'too many arguments'
+  local name=$1 jail=$2
+
+  jail::exists "$jail"           || die "no such jail: ${jail}"
+  jail::template::exists "$name" && die "template already exists: $name"
+
+  local snapname
+  snapname=$(date +%Y-%m-%dT%H:%M:%S)
+  zfs snapshot "${JAIL_DATASET}/${jail}/os@${snapname}"
+  zfs send "${JAIL_DATASET}/${jail}/os@${snapname}" | zfs receive -v "${JAIL_DATASET}/templates/${name}"
+  zfs destroy "${JAIL_DATASET}/${jail}/os@${snapname}"
 }
 
 cmd::destroy_snapshot(){
@@ -423,8 +453,7 @@ cmd::exec(){
 
   [ $# -lt 1 ] && cmd::usage 'JAIL not specified'
   [ $# -lt 2 ] && cmd::usage 'COMMAND not specified'
-  jail=$1
-  shift
+  jail=$1; shift
   jail::exists "$jail" || die "no such jail: ${jail}"
 
   jail::exec "$jail" "$@"
@@ -709,8 +738,7 @@ cmd::shell(){
 
   [ $# -lt 1 ] && cmd::usage 'JAIL not specified'
   [ $# -gt 1 ] && cmd::usage 'too many arguments'
-  jail::exists "$1" || die "no such jail: ${1}"
-
+  jail::exists "$1"  || die "no such jail: ${1}"
   jail::running "$1" || die "jail not running: ${1}"
 
   jail::exec "$1" /bin/sh
