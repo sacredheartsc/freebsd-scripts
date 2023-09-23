@@ -737,9 +737,11 @@ cmd::show(){
   printf -- '------------------------- JAIL CONFIGURATION -------------------------\n'
   cat "/etc/jail.conf.d/${1}.conf"
   printf -- '\n---------------------------- ZFS DATASET -----------------------------\n'
-  zfs list -r -o name,quota,used,avail,mountpoint "${JAIL_DATASET}/${1}/os" "${JAIL_DATASET}/${1}/data"
-  printf -- '\n----------------------------- SNAPSHOTS ------------------------------\n'
-  zfs list -r -t snapshot "${JAIL_DATASET}/${1}/os" "${JAIL_DATASET}/${1}/data"
+  zfs list -r -o name,quota,used,avail,mountpoint \
+    "${JAIL_DATASET}/${1}/os" \
+    "${JAIL_DATASET}/${1}/data" \
+    | sed "s|^${JAIL_DATASET}/${1}/||" \
+    | column -t
   printf -- '\n--------------------------- RESOURCE LIMITS --------------------------\n'
   rctl -h "jail:${1}" | cut -d: -f3-
 }
