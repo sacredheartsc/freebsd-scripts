@@ -40,23 +40,23 @@ Commands:
   create                Create a new jail
   create-snapshot|snap  Take a snapshot of a jail
   create-template       Create a template from a jail
-  destroy|rm            Delete a jail and its dataset
   destroy-snapshot|rms  Delete a jail snapshot
   destroy-template|rmt  Delete a template
+  destroy|rm            Delete a jail and its dataset
   download-release      Download and create a FreeBSD release template
   edit                  Edit a jail's configuration
   exec                  Run a command within the jail
   init                  Initialize the jail dataset
-  list|ls               List configured jails
   list-snapshots|lss    List jail snapshots
   list-templates|lst    List available templates
+  list|ls               List configured jails
   reprovision           Wipe and reprovision an OS dataset from template
   restart               Restart a jail
   rollback              Rollback a jail to a given snapshot
   shell|sh              Run a shell within the jail
   show                  Show jail configuration
-  statistics|stat       Show running jail statistics
   start                 Start a jail
+  statistics|stat       Show running jail statistics
   stop                  Stop a jail
   update-release        Update a FreeBSD release template"
 
@@ -83,9 +83,9 @@ Commands:
     edit)                  cmd::edit "$@" ;;
     exec)                  cmd::exec "$@" ;;
     init)                  cmd::init "$@" ;;
-    list|ls)               cmd::list "$@" ;;
     list-snapshots|lss)    cmd::list_snapshots "$@" ;;
     list-templates|lst)    cmd::list_templates "$@" ;;
+    list|ls)               cmd::list "$@" ;;
     reprovision)           cmd::reprovision "$@" ;;
     restart)               cmd::restart "$@" ;;
     rollback)              cmd::rollback "$@" ;;
