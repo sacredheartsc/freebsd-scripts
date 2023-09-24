@@ -163,18 +163,24 @@ Options:
   -s SEARCHDOMAIN  DNS search domain"
 
   local \
-    jail_bpf \
+    devfs_ruleset=$DEFAULT_DEVFS_RULESET \
+    jail_bpf=false \
+    jail_cpulimit \
     jail_data_quota \
-    jail_domain \
-    jail_gateway \
+    jail_domain=$DEFAULT_DOMAIN \
     jail_interface=$DEFAULT_INTERFACE \
-    jail_ip \
+    jail_ip='' \
+    jail_memlimit \
     jail_nameservers \
-    jail_netmask \
-    jail_os_quota \
-    jail_searchdomains
+    jail_netmask=$DEFAULT_NETMASK \
+    jail_data_quota=$DEFAULT_DATA_QUOTA \
+    jail_os_quota=$DEFAULT_OS_QUOTA \
+    jail_searchdomains \
+    jail_sshkey \
+    snapshot \
+    opt
+  local jail_gateway="${jail_ip%.*}.1"
 
-  local opt
   while getopts :a:bc:d:g:hi:k:m:n:q:Q:r:s: opt; do
     case $opt in
       a) jail_ip=$OPTARG ;;
@@ -206,7 +212,108 @@ Options:
   jail::template::exists "$template"  || die "no such template: ${template}"
   interface::exists "$jail_interface" || die "no such interface: ${jail_interface}"
 
-  jail::create "$name" "$template"
+  if [ -n "${jail_sshkey:-}" ]; then
+    [ -f "$jail_sshkey" ] || die "ssh key ${jail_sshkey}: file not found"
+  fi
+
+  zfs::ensure_snapshot snapshot "${JAIL_DATASET}/templates/${template}"
+
+  # Clone template into new 'os' dataset.
+  zfs create -v -o mountpoint=none "${JAIL_DATASET}/${name}"
+  zfs clone \
+    -o mountpoint="${JAIL_HOME}/${name}" \
+    -o quota="$jail_os_quota" \
+    "$snapshot" "${JAIL_DATASET}/${name}/os"
+  chmod 700 "${JAIL_HOME}/${name}"
+
+  # Create delegated 'data' dataset.
+  zfs create -v \
+    -o mountpoint=none \
+    -o quota="$jail_data_quota" \
+    "${JAIL_DATASET}/${name}/data"
+
+  # Copy timezone configuration from host.
+  cp -v /etc/localtime "${JAIL_HOME}/${name}/etc/localtime"
+
+  # Generate /etc/resolv.conf in the jail (word-splitting intentional).
+  # shellcheck disable=SC2086
+  [ -n "${jail_nameservers:-}"   ] && printf 'nameserver %s\n' $jail_nameservers     >> "${JAIL_HOME}/${name}/etc/resolv.conf"
+  [ -n "${jail_searchdomains:-}" ] && printf 'search %s\n'     "$jail_searchdomains" >> "${JAIL_HOME}/${name}/etc/resolv.conf"
+
+  # Get the jail's virtual interface name.
+  local vnet_interface
+  vnet_interface=$(jail::name2intf "$name")
+
+  # Set /etc/rc.conf values within the jail.
+  sysrc -v -f "${JAIL_HOME}/${name}/etc/rc.conf" \
+    "hostname=${name}.${jail_domain}" \
+    "ifconfig_e0b_${vnet_interface}_name=jail0" \
+    'ipv6_activate_all_interfaces=NO' \
+    'syslogd_flags=-ss' \
+    'sendmail_enable=NONE' \
+    'dumpdev=NO'
+
+  if [ -n "${jail_ip}" ]; then
+    # If $jail_ip set, configure /etc/rc.conf for static IP.
+    sysrc -v -f "${JAIL_HOME}/${name}/etc/rc.conf" \
+      "ifconfig_jail0=inet ${jail_ip} netmask ${jail_netmask}" \
+      "defaultrouter=${jail_gateway}"
+  else
+    # Othersie, configure /etc/rc.conf for DHCP.
+    sysrc -v -f "${JAIL_HOME}/${name}/etc/rc.conf" "ifconfig_jail0=SYNCDHCP"
+    devfs_ruleset=$JAIL_BPF_RULESET
+  fi
+
+  if [ -n "${jail_sshkey:-}" ]; then
+    # If $jail_sshkey set, enable sshd and root login.
+    echo "PermitRootLogin prohibit-password" | tee -a "${JAIL_HOME}/${name}/etc/ssh/sshd_config"
+    sysrc -v -f "${JAIL_HOME}/${name}/etc/rc.conf" 'sshd_enable=YES'
+    # Copy the ssh key into root's authorized_keys within the jail.
+    install -v -d -m 0700 "${JAIL_HOME}/${name}/root/.ssh"
+    install -v -m 0600 "$jail_sshkey" "${JAIL_HOME}/${name}/root/.ssh/authorized_keys"
+  fi
+
+  # If BPF requested, use our custom bpf ruleset.
+  [ "${jail_bpf}" = true ] && devfs_ruleset=$JAIL_BPF_RULESET
+
+  # Generate jail config file.
+  cat <<EOF > "/etc/jail.conf.d/${name}.conf"
+${name} {
+  path = "${JAIL_HOME}/\$name";
+  host.hostname = "\$name.${jail_domain}";
+
+  exec.created  = "zfs set jailed=on ${JAIL_DATASET}/\$name/data";
+  exec.created += "zfs jail \$name ${JAIL_DATASET}/\$name/data";
+  exec.start    = "zfs mount -a";
+  exec.start   += "/bin/sh /etc/rc";
+  exec.stop     = "/bin/sh /etc/rc.shutdown";
+  exec.clean;
+
+  exec.system_user = "root";
+  exec.jail_user   = "root";
+
+  mount.devfs;
+  devfs_ruleset = "${devfs_ruleset}";
+
+  allow.mount     = true;
+  allow.mount.zfs = true;
+  enforce_statfs  = 1;
+
+  vnet;
+  vnet.interface = "e0b_${vnet_interface}";
+  exec.prestart = "jib addm ${vnet_interface} ${jail_interface}";
+  exec.poststop = "jib destroy ${vnet_interface}";
+}
+EOF
+
+  # Configure rctl resource limits.
+  [ -n "${jail_cpulimit:-}" ] && rctl -a "jail:${name}:pcpu:deny=${jail_cpulimit}"
+  [ -n "${jail_memlimit:-}" ] && rctl -a "jail:${name}:vmemoryuse:deny=${jail_memlimit}"
+
+  # Update host's /etc/rc.conf to start the jail on boot.
+  sysrc -v jail_list+="$name"
+
+  # Start the jail.
   jail::start "$name"
 }
 
@@ -264,6 +371,7 @@ cmd::create_template(){
 
   jail::exists "$jail"           || die "no such jail: ${jail}"
   jail::template::exists "$name" && die "template already exists: $name"
+  jail::running "$jail"          && die "refusing to create template while jail is running: ${jail}"
 
   local snapname
   snapname=$(date +%Y-%m-%dT%H:%M:%S)
@@ -391,7 +499,21 @@ Options:
   fi
 
   jail::running "$1" && jail::stop "$1"
-  jail::destroy "$jail"
+
+  # Delete jail config file.
+  rm "/etc/jail.conf.d/${1}.conf"
+
+  # Remove any rctl limits for the jail.
+  rctl -r "jail:${1}" ||:
+
+  # Remove the jail from the autostart list.
+  sysrc -v jail_list-="$1" ||:
+
+  # Destroy the jail's dataset.
+  zfs destroy -v -r "${JAIL_DATASET}/${1}"
+
+  # Delete the old mountpoint.
+  rmdir "${JAIL_HOME}/${1}"
 }
 
 cmd::download_release() {
@@ -463,7 +585,7 @@ cmd::init(){
   local usage='init'
   local help='Initialize jails dataset.'
 
-  local opt
+  local opt release template
   while getopts :h opt; do
     case $opt in
       h) cmd::help ;;
@@ -474,7 +596,35 @@ cmd::init(){
 
   [ $# -eq 0 ] || cmd::usage 'too many arguments'
 
-  jail::init
+  # Create the jail parent dataset.
+  [ -d "$JAIL_HOME" ] || zfs create -v -o mountpoint="${JAIL_HOME}" "${JAIL_DATASET}"
+  chmod 700 "$JAIL_HOME"
+
+  # Download current FreeBSD rootfs and create a template jail.
+  release=$(uname -r)
+  jail::template::release2name template "$release"
+  jail::template::exists "$template" || jail::template::download_release "$release"
+
+  # The `jib` script is used to create VNET interfaces. Add it to the PATH.
+  install -v -m 0555 /usr/share/examples/jails/jib /usr/local/sbin/jib
+
+  # Add a devfs ruleset to allow BPF within jails.
+  if ! grep -xq "\[.*=${JAIL_BPF_RULESET}\]" /etc/devfs.rules 2>/dev/null; then
+    cat <<EOF >> /etc/devfs.rules
+[devfsrules_jail_vnet_bpf=${JAIL_BPF_RULESET}]
+add include \$devfsrules_jail_vnet
+add path 'bpf*' unhide
+EOF
+  fi
+
+  # Enable jails to start on boot.
+  sysrc -v jail_enable=YES jail_parallel_start=YES
+
+  # Enable RCTL process accounting for jail resource limits.
+  if ! grep -xqF 'kern.racct.enable="1"' /boot/loader.conf; then
+    echo 'kern.racct.enable="1"' | tee -a /boot/loader.conf
+    echo 'Reboot required to enable resource accounting via RCTL!'
+  fi
 }
 
 cmd::list(){
@@ -670,7 +820,7 @@ cmd::reprovision(){
   local usage='reprovision JAIL TEMPLATE'
   local help="Wipe and reprovision a jail's OS dataset from a template."
 
-  local opt noconfirm=false
+  local opt noconfirm=false running=false
   while getopts :hy opt; do
     case $opt in
       h) cmd::help ;;
@@ -696,9 +846,61 @@ cmd::reprovision(){
     esac
   fi
 
-  jail::running "$jail" && jail::stop "$jail"
-  jail::reprovision "$jail" "$template"
-  jail::start "$jail"
+  # If the jail is running, stop it.
+  if jail::running "$jail"; then
+    running=true
+    jail::stop "$jail"
+  fi
+
+  local snapshot old_quota old_ifconfig old_defaultrouter old_hostname old_resolvconf
+
+  # Get the latest snapshot for the template (if not specified).
+  zfs::ensure_snapshot snapshot "${JAIL_DATASET}/templates/${template}"
+
+  # Stash old configuration data.
+  old_quota=$(zfs get -Hp -o value quota "${JAIL_DATASET}/${jail}/os")
+  old_hostname=$(sysrc -f "${JAIL_HOME}/${jail}/etc/rc.conf" -qn hostname)
+  old_ifconfig=$(sysrc -f "${JAIL_HOME}/${jail}/etc/rc.conf" -qn ifconfig_jail0)
+  old_defaultrouter=$(sysrc -f "${JAIL_HOME}/${jail}/etc/rc.conf" -qn defaultrouter) ||:
+  old_sshkey=$(cat "${JAIL_HOME}/${jail}/root/.ssh/authorized_keys") ||:
+  old_resolvconf=$(cat "${JAIL_HOME}/${jail}/etc/resolv.conf") ||:
+
+  # Reprovision OS dataset from template.
+  zfs destroy -v -r "${JAIL_DATASET}/${jail}/os"
+  zfs clone \
+    -o mountpoint="${JAIL_HOME}/${jail}" \
+    -o quota="$old_quota" \
+    "$snapshot" "${JAIL_DATASET}/${jail}/os"
+
+  # Copy timezone configuration from host.
+  cp -v /etc/localtime "${JAIL_HOME}/${jail}/etc/localtime"
+
+  # Restore stashed configuration data.
+  sysrc -v -f "${JAIL_HOME}/${jail}/etc/rc.conf" \
+    "hostname=${old_hostname}" \
+    "ifconfig_e0b_$(jail::name2intf "$jail")_name=jail0" \
+    "ifconfig_jail0=${old_ifconfig}" \
+    'ipv6_activate_all_interfaces=NO' \
+    'syslogd_flags=-ss' \
+    'sendmail_enable=NONE' \
+    'dumpdev=NO'
+
+  [ -n "$old_defaultrouter" ] && sysrc -f "${JAIL_HOME}/${jail}/etc/rc.conf" "defaultrouter=${old_defaultrouter}"
+
+  [ -n "$old_resolvconf" ] && printf '%s\n' "$old_resolvconf" | tee "${JAIL_HOME}/${jail}/etc/resolv.conf"
+
+  if [ -n "$old_sshkey" ]; then
+    echo "PermitRootLogin prohibit-password" | tee -a "${JAIL_HOME}/${jail}/etc/ssh/sshd_config"
+    sysrc -v -f "${JAIL_HOME}/${jail}/etc/rc.conf" 'sshd_enable=YES'
+    install -v -d -m 0700 "${JAIL_HOME}/${jail}/root/.ssh"
+    install -v -m 0600 /dev/null "${JAIL_HOME}/${jail}/root/.ssh/authorized_keys"
+    printf '%s\n' "$old_sshkey" | tee "${JAIL_HOME}/${jail}/root/.ssh/authorized_keys"
+  fi
+
+  # If the jail was running, restart it.
+  if [ "$running" = true ]; then
+    jail::start "$jail"
+  fi
 }
 
 cmd::restart(){
@@ -836,129 +1038,6 @@ interface::exists(){
   ifconfig "$1" > /dev/null 2>&1
 }
 
-jail::create(){
-  local name=$1 template=$2 devfs_ruleset=$DEFAULT_DEVFS_RULESET snapshot
-
-  # The following variables can be overidden by the caller:
-  local \
-    jail_bpf=${jail_bpf:-false} \
-    jail_cpulimit=${jail_cpulimit:-} \
-    jail_data_quota=${jail_data_quota:-$DEFAULT_DATA_QUOTA} \
-    jail_domain=${jail_domain:-$DEFAULT_DOMAIN} \
-    jail_interface=${jail_interface:-$DEFAULT_INTERFACE} \
-    jail_ip=${jail_ip:-} \
-    jail_memlimit=${jail_memlimit:-} \
-    jail_nameservers=${jail_nameservers:-} \
-    jail_netmask=${jail_netmask:-$DEFAULT_NETMASK} \
-    jail_os_quota=${jail_os_quota:-$DEFAULT_OS_QUOTA} \
-    jail_searchdomains=${jail_searchdomains:-} \
-    jail_sshkey=${jail_sshkey:-}
-  local jail_gateway=${jail_gateway:-${jail_ip%.*}.1}
-
-  zfs::ensure_snapshot snapshot "${JAIL_DATASET}/templates/${template}"
-
-  # clone template into new dataset
-  zfs create -v -o mountpoint=none "${JAIL_DATASET}/${name}"
-  zfs clone \
-    -o mountpoint="${JAIL_HOME}/${name}" \
-    -o quota="$jail_os_quota" \
-    "$snapshot" "${JAIL_DATASET}/${name}/os"
-  chmod 700 "${JAIL_HOME}/${name}"
-
-  # create delegated dataset
-  zfs create -v \
-    -o mountpoint=none \
-    -o quota="$jail_data_quota" \
-    "${JAIL_DATASET}/${name}/data"
-
-  # copy timezone configuration from host
-  cp -v /etc/localtime "${JAIL_HOME}/${name}/etc/localtime"
-
-  # Generate /etc/resolv.conf in the jail (word-splitting intentional)
-  # shellcheck disable=SC2086
-  [ -n "${jail_nameservers}"   ] && printf 'nameserver %s\n' $jail_nameservers     >> "${JAIL_HOME}/${name}/etc/resolv.conf"
-  [ -n "${jail_searchdomains}" ] && printf 'search %s\n'     "$jail_searchdomains" >> "${JAIL_HOME}/${name}/etc/resolv.conf"
-
-  local vnet_interface
-  vnet_interface=$(jail::name2intf "$name")
-
-  # set /etc/rc.conf values in the jail
-  sysrc -v -f "${JAIL_HOME}/${name}/etc/rc.conf" \
-    "hostname=${name}.${jail_domain}" \
-    "ifconfig_e0b_${vnet_interface}_name=jail0" \
-    'ipv6_activate_all_interfaces=NO' \
-    'syslogd_flags=-ss' \
-    'sendmail_enable=NONE' \
-    'dumpdev=NO'
-
-  if [ -n "${jail_ip}" ]; then
-    # configure /etc/rc.conf for static IP
-    sysrc -v -f "${JAIL_HOME}/${name}/etc/rc.conf" \
-      "ifconfig_jail0=inet ${jail_ip} netmask ${jail_netmask}" \
-      "defaultrouter=${jail_gateway}"
-  else
-    # configure /etc/rc.conf for DHCP
-    sysrc -v -f "${JAIL_HOME}/${name}/etc/rc.conf" "ifconfig_jail0=SYNCDHCP"
-    devfs_ruleset=$JAIL_BPF_RULESET
-  fi
-
-  if [ -f "$jail_sshkey" ]; then
-    # enable sshd and root login
-    echo "PermitRootLogin prohibit-password" | tee -a "${JAIL_HOME}/${name}/etc/ssh/sshd_config"
-    sysrc -v -f "${JAIL_HOME}/${name}/etc/rc.conf" 'sshd_enable=YES'
-    # copy ssh key into jail
-    install -v -d -m 0700 "${JAIL_HOME}/${name}/root/.ssh"
-    install -v -m 0600 "$jail_sshkey" "${JAIL_HOME}/${name}/root/.ssh/authorized_keys"
-  fi
-
-  [ "${jail_bpf}" = true ] && devfs_ruleset=$JAIL_BPF_RULESET
-
-  # generate jail config file
-  cat <<EOF > "/etc/jail.conf.d/${name}.conf"
-${name} {
-  path = "${JAIL_HOME}/\$name";
-  host.hostname = "\$name.${jail_domain}";
-
-  exec.created  = "zfs set jailed=on ${JAIL_DATASET}/\$name/data";
-  exec.created += "zfs jail \$name ${JAIL_DATASET}/\$name/data";
-  exec.start    = "zfs mount -a";
-  exec.start   += "/bin/sh /etc/rc";
-  exec.stop     = "/bin/sh /etc/rc.shutdown";
-  exec.clean;
-
-  exec.system_user = "root";
-  exec.jail_user   = "root";
-
-  mount.devfs;
-  devfs_ruleset = "${devfs_ruleset}";
-
-  allow.mount     = true;
-  allow.mount.zfs = true;
-  enforce_statfs  = 1;
-
-  vnet;
-  vnet.interface = "e0b_${vnet_interface}";
-  exec.prestart = "jib addm ${vnet_interface} ${jail_interface}";
-  exec.poststop = "jib destroy ${vnet_interface}";
-}
-EOF
-
-  # configure rctl resource limits
-  [ -n "$jail_cpulimit" ] && rctl -a "jail:${name}:pcpu:deny=${jail_cpulimit}"
-  [ -n "$jail_memlimit" ] && rctl -a "jail:${name}:vmemoryuse:deny=${jail_memlimit}"
-
-  # configure jail to start automatically on boot
-  sysrc -v jail_list+="$name"
-}
-
-jail::destroy(){
-  rm "/etc/jail.conf.d/${1}.conf"
-  rctl -r "jail:${1}" ||:
-  sysrc -v jail_list-="$1" ||:
-  zfs destroy -v -r "${JAIL_DATASET}/${1}"
-  rmdir "${JAIL_HOME}/${1}"
-}
-
 jail::exec() {
   local jail=$1
   shift
@@ -967,34 +1046,6 @@ jail::exec() {
 
 jail::exists(){
   test -f "/etc/jail.conf.d/${1}.conf"
-}
-
-jail::init(){
-  local release template
-
-  [ -d "$JAIL_HOME" ] || zfs create -v -o mountpoint="${JAIL_HOME}" "${JAIL_DATASET}"
-  chmod 700 "$JAIL_HOME"
-
-  release=$(uname -r)
-  jail::template::release2name template "$release"
-  jail::template::exists "$template" || jail::template::download_release "$release"
-
-  install -v -m 0555 /usr/share/examples/jails/jib /usr/local/sbin/jib
-
-  if ! grep -xq "\[.*=${JAIL_BPF_RULESET}\]" /etc/devfs.rules 2>/dev/null; then
-    cat <<EOF >> /etc/devfs.rules
-[devfsrules_jail_vnet_bpf=${JAIL_BPF_RULESET}]
-add include \$devfsrules_jail_vnet
-add path 'bpf*' unhide
-EOF
-  fi
-
-  sysrc -v jail_enable=YES jail_parallel_start=YES
-
-  if ! grep -xqF 'kern.racct.enable="1"' /boot/loader.conf; then
-    echo 'kern.racct.enable="1"' | tee -a /boot/loader.conf
-    echo 'Reboot required to enable resource accounting via RCTL!'
-  fi
 }
 
 jail::name2intf(){
@@ -1016,54 +1067,6 @@ jail::restart(){
   jail -v -f "/etc/jail.conf.d/${1}.conf" -rc "$1"
 }
 
-jail::reprovision(){
-  local jail=$1 template=$2 \
-    snapshot old_quota old_ifconfig old_defaultrouter old_hostname old_resolvconf
-
-  # get the latest snapshot for the template (if not specified)
-  zfs::ensure_snapshot snapshot "${JAIL_DATASET}/templates/${template}"
-
-  # stash old configuration data
-  old_quota=$(zfs get -Hp -o value quota "${JAIL_DATASET}/${jail}/os")
-  old_hostname=$(sysrc -f "${JAIL_HOME}/${jail}/etc/rc.conf" -qn hostname)
-  old_ifconfig=$(sysrc -f "${JAIL_HOME}/${jail}/etc/rc.conf" -qn ifconfig_jail0)
-  old_defaultrouter=$(sysrc -f "${JAIL_HOME}/${jail}/etc/rc.conf" -qn defaultrouter) ||:
-  old_sshkey=$(cat "${JAIL_HOME}/${jail}/root/.ssh/authorized_keys") ||:
-  old_resolvconf=$(cat "${JAIL_HOME}/${jail}/etc/resolv.conf") ||:
-
-  # reprovision OS dataset from template
-  zfs destroy -v -r "${JAIL_DATASET}/${jail}/os"
-  zfs clone \
-    -o mountpoint="${JAIL_HOME}/${jail}" \
-    -o quota="$old_quota" \
-    "$snapshot" "${JAIL_DATASET}/${jail}/os"
-
-  # copy timezone configuration from host
-  cp -v /etc/localtime "${JAIL_HOME}/${jail}/etc/localtime"
-
-  # restore stashed configuration data
-  sysrc -v -f "${JAIL_HOME}/${jail}/etc/rc.conf" \
-    "hostname=${old_hostname}" \
-    "ifconfig_e0b_$(jail::name2intf "$jail")_name=jail0" \
-    "ifconfig_jail0=${old_ifconfig}" \
-    'ipv6_activate_all_interfaces=NO' \
-    'syslogd_flags=-ss' \
-    'sendmail_enable=NONE' \
-    'dumpdev=NO'
-
-  [ -n "$old_defaultrouter" ] && sysrc -f "${JAIL_HOME}/${jail}/etc/rc.conf" "defaultrouter=${old_defaultrouter}"
-
-  [ -n "$old_resolvconf" ] && printf '%s\n' "$old_resolvconf" | tee "${JAIL_HOME}/${jail}/etc/resolv.conf"
-
-  if [ -n "$old_sshkey" ]; then
-    echo "PermitRootLogin prohibit-password" | tee -a "${JAIL_HOME}/${jail}/etc/ssh/sshd_config"
-    sysrc -v -f "${JAIL_HOME}/${jail}/etc/rc.conf" 'sshd_enable=YES'
-    install -v -d -m 0700 "${JAIL_HOME}/${jail}/root/.ssh"
-    install -v -m 0600 /dev/null "${JAIL_HOME}/${jail}/root/.ssh/authorized_keys"
-    printf '%s\n' "$old_sshkey" | tee "${JAIL_HOME}/${jail}/root/.ssh/authorized_keys"
-  fi
-}
-
 jail::running(){
   jls -j "$1" > /dev/null 2>&1
 }
@@ -1081,6 +1084,7 @@ jail::template::exists(){
 }
 
 jail::template::download_release(){
+  # Download a given FreeBSD release and create a template jail.
   local release=$1 arch base_tarball template
 
   arch=$(uname -p)
@@ -1099,10 +1103,13 @@ jail::template::download_release(){
 }
 
 jail::template::release2name(){
+  # Convert a FreeBSD release version to a template name.
+  # e.g. for "13.2-RELEASE", return "freebsd13".
   setvar "$1" "freebsd${2%.*}"
 }
 
 jail::template::update_release(){
+  # Run freebsd-update within a the given template and take a fresh snapshot.
   local template=$1 snapshot
 
   PAGER=/bin/cat freebsd-update -b "${JAIL_HOME}/templates/${template}" --not-running-from-cron fetch install
@@ -1112,6 +1119,8 @@ jail::template::update_release(){
 }
 
 zfs::ensure_snapshot(){
+  # If the given zfs dataset is a snapshot, return as-is.
+  # Otherwise, get the latest snapshot from the given dataset and return that.
   local upvar=$1 dataset=$2 latest
 
   if [ "${dataset#*@}" = "$dataset" ]; then
