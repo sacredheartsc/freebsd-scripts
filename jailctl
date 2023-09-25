@@ -60,13 +60,7 @@ Commands:
   stop                  Stop a jail
   update-release        Update a FreeBSD release template"
 
-  while getopts :h opt; do
-    case $opt in
-      h) cmd::help ;;
-      ?) cmd::usage "unknown option: ${OPTARG}" ;;
-    esac
-  done
-  shift $((OPTIND - 1))
+  cmd::getopt_help "$@"; shift $((OPTIND - 1))
 
   [ $# -ge 1 ] || cmd::usage 'no comand specified'
   local cmd=$1
@@ -140,6 +134,16 @@ cmd::usage(){
   [ $# -gt 0 ] && printf '%s: %s\n' "jailctl" "$1" 1>&2
   printf 'Usage: %s %s\n' jailctl "${usage}" 1>&2
   exit 2
+}
+
+cmd::getopt_help(){
+  local opt
+  while getopts :h opt; do
+    case $opt in
+      h) cmd::help ;;
+      ?) cmd::usage "unknown option: -${OPTARG}" ;;
+    esac
+  done
 }
 
 cmd::create(){
@@ -355,14 +359,7 @@ cmd::create_template(){
   local usage='create-template NAME JAIL'
   local help='Create a template from a jail.'
 
-  local opt
-  while getopts :h opt; do
-    case $opt in
-      h) cmd::help ;;
-      ?) cmd::usage "unknown option: -${OPTARG}" ;;
-    esac
-  done
-  shift $((OPTIND - 1))
+  cmd::getopt_help "$@"; shift $((OPTIND - 1))
 
   [ $# -lt 1 ] && cmd::usage 'NAME not specified'
   [ $# -lt 2 ] && cmd::usage 'JAIL not specified'
@@ -520,14 +517,7 @@ cmd::download_release() {
   local usage='download-release RELEASE'
   local help='Download and create a FreeBSD release template.'
 
-  local opt
-  while getopts :h opt; do
-    case $opt in
-      h) cmd::help ;;
-      ?) cmd::usage "unknown option: -${OPTARG}" ;;
-    esac
-  done
-  shift $((OPTIND - 1))
+  cmd::getopt_help "$@"; shift $((OPTIND - 1))
 
   [ $# -lt 1 ] && cmd::usage 'RELEASE not specified'
   [ $# -gt 1 ] && cmd::usage 'too many arguments'
@@ -564,14 +554,7 @@ cmd::exec(){
   local usage='exec JAIL COMMAND...'
   local help='Run a command within the jail.'
 
-  local opt
-  while getopts :h opt; do
-    case $opt in
-      h) cmd::help ;;
-      ?) cmd::usage "unknown option: -${OPTARG}" ;;
-    esac
-  done
-  shift $((OPTIND - 1))
+  cmd::getopt_help "$@"; shift $((OPTIND - 1))
 
   [ $# -lt 1 ] && cmd::usage 'JAIL not specified'
   [ $# -lt 2 ] && cmd::usage 'COMMAND not specified'
@@ -585,14 +568,7 @@ cmd::init(){
   local usage='init'
   local help='Initialize jails dataset.'
 
-  local opt release template
-  while getopts :h opt; do
-    case $opt in
-      h) cmd::help ;;
-      ?) cmd::usage "unknown option: -${OPTARG}" ;;
-    esac
-  done
-  shift $((OPTIND - 1))
+  cmd::getopt_help "$@"; shift $((OPTIND - 1))
 
   [ $# -eq 0 ] || cmd::usage 'too many arguments'
 
@@ -601,6 +577,7 @@ cmd::init(){
   chmod 700 "$JAIL_HOME"
 
   # Download current FreeBSD rootfs and create a template jail.
+  local release template
   release=$(uname -r)
   jail::template::release2name template "$release"
   jail::template::exists "$template" || jail::template::download_release "$release"
@@ -671,14 +648,7 @@ cmd::list_templates(){
   local usage='list-templates'
   local help='list template datasets.'
 
-  local opt
-  while getopts :h opt; do
-    case $opt in
-      h) cmd::help ;;
-      ?) cmd::usage "unknown option: -${OPTARG}" ;;
-    esac
-  done
-  shift $((OPTIND - 1))
+  cmd::getopt_help "$@"; shift $((OPTIND - 1))
 
   [ $# -eq 0 ] || cmd::usage 'too many arguments'
 
@@ -776,14 +746,7 @@ cmd::start(){
   local usage='start JAIL'
   local help='Start a jail.'
 
-  local opt
-  while getopts :h opt; do
-    case $opt in
-      h) cmd::help ;;
-      ?) cmd::usage "unknown option: -${OPTARG}" ;;
-    esac
-  done
-  shift $((OPTIND - 1))
+  cmd::getopt_help "$@"; shift $((OPTIND - 1))
 
   [ $# -lt 1 ] && cmd::usage 'JAIL not specified'
   [ $# -gt 1 ] && cmd::usage 'too many arguments'
@@ -798,14 +761,7 @@ cmd::stop(){
   local usage='stop JAIL'
   local help='Stop a jail.'
 
-  local opt
-  while getopts :h opt; do
-    case $opt in
-      h) cmd::help ;;
-      ?) cmd::usage "unknown option: -${OPTARG}" ;;
-    esac
-  done
-  shift $((OPTIND - 1))
+  cmd::getopt_help "$@"; shift $((OPTIND - 1))
 
   [ $# -lt 1 ] && cmd::usage 'JAIL not specified'
   [ $# -gt 1 ] && cmd::usage 'too many arguments'
@@ -929,14 +885,7 @@ cmd::shell(){
   local usage='shell JAIL'
   local help='Run a shell within the jail.'
 
-  local opt
-  while getopts :h opt; do
-    case $opt in
-      h) cmd::help ;;
-      ?) cmd::usage "unknown option: -${OPTARG}" ;;
-    esac
-  done
-  shift $((OPTIND - 1))
+  cmd::getopt_help "$@"; shift $((OPTIND - 1))
 
   [ $# -lt 1 ] && cmd::usage 'JAIL not specified'
   [ $# -gt 1 ] && cmd::usage 'too many arguments'
@@ -978,19 +927,12 @@ cmd::statistics(){
   local usage='statistics JAIL'
   local help='Show running jail statistics.'
 
-  local opt
-  while getopts :h opt; do
-    case $opt in
-      h) cmd::help ;;
-      ?) cmd::usage "unknown option: -${OPTARG}" ;;
-    esac
-  done
-  shift $((OPTIND - 1))
+  cmd::getopt_help "$@"; shift $((OPTIND - 1))
 
   [ $# -lt 1 ] && cmd::usage 'JAIL not specified'
   [ $# -gt 1 ] && cmd::usage 'too many arguments'
 
-  jail::exists "$1" || die "no such jail: ${1}"
+  jail::exists "$1"  || die "no such jail: ${1}"
   jail::running "$1" || die "jail not running: ${1}"
 
   printf -- '---------------------------- JAIL STATUS -----------------------------\n'
@@ -1014,14 +956,7 @@ cmd::update_release(){
   local usage='update-release TEMPLATE'
   local help='Update a FreeBSD release template.'
 
-  local opt
-  while getopts :h opt; do
-    case $opt in
-      h) cmd::help ;;
-      ?) cmd::usage "unknown option: -${OPTARG}" ;;
-    esac
-  done
-  shift $((OPTIND - 1))
+  cmd::getopt_help "$@"; shift $((OPTIND - 1))
 
   [ $# -lt 1 ] && cmd::usage 'TEMPLATE not specified'
   [ $# -gt 1 ] && cmd::usage 'too many arguments'
