@@ -56,7 +56,7 @@ Commands:
   shell|sh              Run a shell within the jail
   show                  Show jail configuration
   start                 Start a jail
-  statistics|stat       Show running jail statistics
+  status                Show running jail status
   stop                  Stop a jail
   update-release        Update a FreeBSD release template"
 
@@ -86,7 +86,7 @@ Commands:
     shell|sh)              cmd::shell "$@" ;;
     show)                  cmd::show "$@" ;;
     start)                 cmd::start "$@" ;;
-    statistics|stats|stat) cmd::statistics "$@" ;;
+    status)                cmd::status "$@" ;;
     stop)                  cmd::stop "$@" ;;
     update-release)        cmd::update_release "$@" ;;
     *)                     cmd::usage "unknown command: ${cmd}" ;;
@@ -416,7 +416,7 @@ Options:
   [ -n "$datasets" ] || die "no such snapshot for jail ${jail}: ${snapshot}"
 
   if [ "$noconfirm" != true ]; then
-    read -rp "Really delete ${jail} snapshot ${snapshot}? (y/N) " answer
+    read -rp "Really destroy ${jail} snapshot ${snapshot}? (y/N) " answer
     case $answer in
       [yY]|[yY][eE][sS]) : ;;
       *) die 'operation cancelled' ;;
@@ -454,7 +454,7 @@ Note: a template cannot be deleted while its clones still exist."
   jail::template::exists "$1" || die "no such template: ${1}"
 
   if [ "$noconfirm" != true ]; then
-    read -rp "Really delete template ${1}? (y/N) " answer
+    read -rp "Really destroy template ${1}? (y/N) " answer
     case $answer in
       [yY]|[yY][eE][sS]) : ;;
       *) die 'operation cancelled' ;;
@@ -488,7 +488,7 @@ Options:
   jail::exists "$jail" || die "no such jail: ${jail}"
 
   if [ "$noconfirm" != true ]; then
-    read -rp "Really delete jail ${jail}? (y/N) " answer
+    read -rp "Really destroy jail ${jail}? (y/N) " answer
     case $answer in
       [yY]|[yY][eE][sS]) : ;;
       *) die 'operation cancelled' ;;
@@ -923,9 +923,9 @@ cmd::show(){
   rctl -h "jail:${1}" | cut -d: -f3-
 }
 
-cmd::statistics(){
+cmd::status(){
   local usage='statistics JAIL'
-  local help='Show running jail statistics.'
+  local help='Show running jail status.'
 
   cmd::getopt_help "$@"; shift $((OPTIND - 1))
 
