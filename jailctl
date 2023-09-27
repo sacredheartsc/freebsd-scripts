@@ -4,6 +4,7 @@
 # BSD 2-Clause License
 #
 # Copyright (c) 2023, stonewall (stonewall@sacredheartsc.com)
+# Copyright (c) 2016, Devin Teske
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -89,6 +90,9 @@ Commands:
     status)                cmd::status "$@" ;;
     stop)                  cmd::stop "$@" ;;
     update-release)        cmd::update_release "$@" ;;
+    # The following commands are internal to jailctl. Don't run them manually.
+    _create-epair)         cmd::_create_epair "$@" ;;
+    _destroy-epair)        cmd::_destroy_epair "$@" ;;
     *)                     cmd::usage "unknown command: ${cmd}" ;;
   esac
 }
@@ -100,9 +104,10 @@ Commands:
 readonly JAIL_HOME=/usr/local/jails
 readonly JAIL_DATASET=zroot/jails
 
+readonly TRUNK_INTERFACE=lagg0
 # shellcheck disable=SC2155
 readonly DEFAULT_DOMAIN=$(hostname -d)
-readonly DEFAULT_INTERFACE=vtnet0
+readonly DEFAULT_VLAN=199
 readonly DEFAULT_NETMASK=255.255.255.0
 readonly DEFAULT_OS_QUOTA=24G
 readonly DEFAULT_DATA_QUOTA=8G
@@ -110,6 +115,7 @@ readonly DEFAULT_DATA_QUOTA=8G
 # Leave these values alone.
 readonly JAIL_BPF_RULESET=1000
 readonly DEFAULT_DEVFS_RULESET=5
+readonly EPAIR_NAME_MAX=12
 
 
 ################################################################################
@@ -147,9 +153,9 @@ cmd::getopt_help(){
 }
 
 cmd::create(){
-  local usage='create [-a IP] [-b] [-c CPULIMIT] [-d DOMAIN] [-g GATEWAY] [-i INTERFACE]
-        [-k SSHKEY] [-m MEMLIMIT] [-n NETMASK] [-q QUOTA] [-Q OS_QUOTA] [-r NAMESERVER]
-        [-s SEARCHDOMAIN] NAME TEMPLATE'
+  local usage='create [-a IP] [-b] [-c CPULIMIT] [-d DOMAIN] [-g GATEWAY] [-k SSHKEY]
+        [-m MEMLIMIT] [-n NETMASK] [-q QUOTA] [-Q OS_QUOTA] [-r NAMESERVER]
+        [-s SEARCHDOMAIN] [-v VLANID] NAME TEMPLATE'
   local help="Create a new jail.
 Options:
   -a IP            IPv4 address
@@ -157,14 +163,14 @@ Options:
   -c CPULIMIT      %CPU limit (100 for one core, 200 for two cores, etc)
   -d DOMAIN        Host domain name
   -g GATEWAY       Default IPv4 gateway.
-  -i INTERFACE     Host network interface to bridge
   -k SSHKEY        Path to SSH pubkey for root's authorized_keys
   -m MEMLIMIT      Virtual memory limit
   -n NETMASK       IPv4 netmask
   -q QUOTA         Quota for delegated dataset
   -Q OS_QUOTA      Quota for root filesystem
   -r NAMESERVER    DNS resolver
-  -s SEARCHDOMAIN  DNS search domain"
+  -s SEARCHDOMAIN  DNS search domain
+  -v VLANID        VLAN ID number"
 
   local \
     devfs_ruleset=$DEFAULT_DEVFS_RULESET \
@@ -172,7 +178,7 @@ Options:
     jail_cpulimit \
     jail_data_quota \
     jail_domain=$DEFAULT_DOMAIN \
-    jail_interface=$DEFAULT_INTERFACE \
+    jail_vlan=$DEFAULT_VLAN \
     jail_ip='' \
     jail_memlimit \
     jail_nameservers \
@@ -185,7 +191,7 @@ Options:
     opt
   local jail_gateway="${jail_ip%.*}.1"
 
-  while getopts :a:bc:d:g:hi:k:m:n:q:Q:r:s: opt; do
+  while getopts :a:bc:d:g:hk:m:n:q:Q:r:s:v: opt; do
     case $opt in
       a) jail_ip=$OPTARG ;;
       b) jail_bpf=true ;;
@@ -193,7 +199,6 @@ Options:
       d) jail_domain=$OPTARG ;;
       g) jail_gateway=$OPTARG ;;
       h) cmd::help ;;
-      i) jail_interface=$OPTARG ;;
       k) jail_sshkey=$OPTARG ;;
       m) jail_memlimit=$OPTARG ;;
       n) jail_netmask=$OPTARG ;;
@@ -201,6 +206,7 @@ Options:
       Q) jail_os_quota=$OPTARG ;;
       r) jail_nameservers="${jail_nameservers:-} ${OPTARG}" ;;
       s) jail_searchdomains="${jail_searchdomains:-} ${OPTARG}" ;;
+      v) jail_vlan=$OPTARG ;;
       :) cmd::usage "missing option value: -${OPTARG}" ;;
       ?) cmd::usage "unknown option: -${OPTARG}" ;;
     esac
@@ -212,9 +218,10 @@ Options:
   [ $# -gt 2 ] && cmd::usage 'too many arguments'
   local name=$1 template=$2
 
-  jail::exists "$name"                && die "jail name already in use: ${name}"
-  jail::template::exists "$template"  || die "no such template: ${template}"
-  interface::exists "$jail_interface" || die "no such interface: ${jail_interface}"
+  jail::exists "$name"                   && die "jail name already in use: ${name}"
+  jail::template::exists "$template"     || die "no such template: ${template}"
+
+  interface::exists "bridge${jail_vlan}" || interface::add_vlan "$jail_vlan"
 
   if [ -n "${jail_sshkey:-}" ]; then
     [ -f "$jail_sshkey" ] || die "ssh key ${jail_sshkey}: file not found"
@@ -245,13 +252,13 @@ Options:
   [ -n "${jail_searchdomains:-}" ] && printf 'search %s\n'     "$jail_searchdomains" >> "${JAIL_HOME}/${name}/etc/resolv.conf"
 
   # Get the jail's virtual interface name.
-  local vnet_interface
-  vnet_interface=$(jail::name2intf "$name")
+  local epair_name
+  epair_name=$(interface::epair::jail2name "$name")
 
   # Set /etc/rc.conf values within the jail.
   sysrc -v -f "${JAIL_HOME}/${name}/etc/rc.conf" \
     "hostname=${name}.${jail_domain}" \
-    "ifconfig_e0b_${vnet_interface}_name=jail0" \
+    "ifconfig_ej_${epair_name}_name=jail0" \
     'ipv6_activate_all_interfaces=NO' \
     'syslogd_flags=-ss' \
     'sendmail_enable=NONE' \
@@ -304,9 +311,9 @@ ${name} {
   enforce_statfs  = 1;
 
   vnet;
-  vnet.interface = "e0b_${vnet_interface}";
-  exec.prestart = "jib addm ${vnet_interface} ${jail_interface}";
-  exec.poststop = "jib destroy ${vnet_interface}";
+  vnet.interface = "ej_${epair_name}";
+  exec.prestart = "jailctl _create-epair \$name vlan${jail_vlan} bridge${jail_vlan}";
+  exec.poststop = "jailctl _destroy-epair \$name";
 }
 EOF
 
@@ -581,9 +588,6 @@ cmd::init(){
   release=$(uname -r)
   jail::template::release2name template "$release"
   jail::template::exists "$template" || jail::template::download_release "$release"
-
-  # The `jib` script is used to create VNET interfaces. Add it to the PATH.
-  install -v -m 0555 /usr/share/examples/jails/jib /usr/local/sbin/jib
 
   # Add a devfs ruleset to allow BPF within jails.
   if ! grep -xq "\[.*=${JAIL_BPF_RULESET}\]" /etc/devfs.rules 2>/dev/null; then
@@ -965,13 +969,145 @@ cmd::update_release(){
   jail::template::update_release "$1"
 }
 
+cmd::_create_epair(){
+  local usage='_create-epair JAIL INTERFACE BRIDGE'
+  local help="Create an epair for a VNET jail.
+DO NOT RUN THIS COMMAND MANUALLY. It is invoked by each jail's exec.prestart."
+
+  cmd::getopt_help "$@"; shift $((OPTIND - 1))
+
+  [ $# -lt 1 ] && cmd::usage 'JAIL not specified'
+  [ $# -lt 2 ] && cmd::usage 'INTERFACE not specified'
+  [ $# -lt 3 ] && cmd::usage 'BRIDGE not specified'
+  [ $# -gt 3 ] && cmd::usage 'too many arguments'
+  local jail=$1 interface=$2 bridge=$3 \
+    new_epair epair_name epair_bridge_mac epair_jail_mac
+
+  interface::exists "$interface" || die "no such interface: ${interface}"
+  interface::exists "$bridge"    || die "no such bridge: ${bridge}"
+
+  epair_name=$(interface::epair::jail2name "$jail")
+  interface::epair::derive_mac "$interface" "$jail" epair_bridge_mac epair_jail_mac
+
+  new_epair=$(ifconfig epair create)
+  ifconfig "$bridge" addm "$new_epair"
+
+  ifconfig "$new_epair"       name "eb_${epair_name}"
+  ifconfig "eb_${epair_name}" up
+  ifconfig "eb_${epair_name}" ether "$epair_bridge_mac"
+
+  ifconfig "${new_epair%a}b" name "ej_${epair_name}"
+  ifconfig "ej_${epair_name}" up
+  ifconfig "ej_${epair_name}" ether "$epair_jail_mac"
+}
+
+cmd::_destroy_epair(){
+  local usage='_destroy-epair JAIL'
+  local help="Destroy an epair for a VNET jail.
+DO NOT RUN THIS COMMAND MANUALLY. It is invoked by each jail's exec.poststop."
+
+  cmd::getopt_help "$@"; shift $((OPTIND - 1))
+
+  [ $# -lt 1 ] && cmd::usage 'JAIL not specified'
+  [ $# -gt 2 ] && cmd::usage 'too many arguments'
+  local jail=$1 epair_name
+
+  epair_name=$(interface::epair::jail2name "$jail")
+  ifconfig "eb_${epair_name}" destroy
+}
+
 
 ################################################################################
 # "Library" functions.
 ################################################################################
+interface::add_vlan(){
+  local id=$1
+  ifconfig "vlan${id}" create
+  ifconfig "vlan${id}" vlan "$id" vlandev "$TRUNK_INTERFACE" up
+  ifconfig "bridge${id}" create
+  ifconfig "bridge${id}" addm "vlan${id}" up
+  sysrc -v \
+    "cloned_interfaces+=vlan${id} bridge${id}" \
+    "ifconfig_vlan${id}=vlan ${id} vlandev ${TRUNK_INTERFACE} up" \
+    "ifconfig_bridge${id}=addm vlan${id} up"
+}
+
 interface::exists(){
   ifconfig "$1" > /dev/null 2>&1
 }
+
+interface::epair::derive_mac(){
+  # Derive unique mac addresses for an epair interface, based on the physical
+  # interface address + jail name.
+  local iface=$1 name=$2 upvar_a=$3 upvar_b=$4
+  local hwaddr checksum epair_mac_a epair_mac_b
+
+  # Source: /usr/share/examples/jails/jib
+  # Calculate MAC address derived from given iface.
+  #
+  # The formula I'm using is ``NP:SS:SS:II:II:II'' where:
+  # + N denotes 4 bits used as a counter to support branching
+  #   each parent interface up to 15 times under the same jail
+  #   name (see S below).
+  # [NOTE: I'm not doing this. Since I have only one intf per jail, N=0.]
+  # + P denotes the special nibble whose value, if one of
+  #   2, 6, A, or E (but usually 2) denotes a privately
+  #   administered MAC address (while remaining routable).
+  # + S denotes 16 bits, the sum(1) value of the jail name.
+  # + I denotes bits that are inherited from parent interface.
+  #
+  # The S bits are a CRC-16 checksum of NAME, allowing the jail
+  # to change link numbers in ng_bridge(4) without affecting the
+  # MAC address. Meanwhile, if...
+  #   + the jail NAME changes (e.g., it was duplicated and given
+  #     a new name with no other changes)
+  #   + the underlying network interface changes
+  #   + the jail is moved to another host
+  # the MAC address will be recalculated to a new, similarly
+  # unique value preventing conflict.
+  #
+  hwaddr=$(ifconfig "$iface" ether | awk '/ether/,$0=$2')
+
+  # ??:??:??:II:II:II
+  epair_mac_a=${hwaddr#??:??:??} # => :II:II:II
+
+  # => :SS:SS:II:II:II
+  checksum=$(printf '%s' "$name" | sum | cut -d' ' -f1)
+  epair_mac_a="$(printf ':%02x:%02x' "$(( checksum >> 8 & 255 ))" "$(( checksum & 255 ))")${epair_mac_a}"
+
+  # => P:SS:SS:II:II:II
+  case $hwaddr in
+    ?2:*)    epair_mac_a="a${epair_mac_a}"  epair_mac_b="e${epair_mac_a}" ;;
+    ?[Ee]:*) epair_mac_a="2${epair_mac_a}"  epair_mac_b="6${epair_mac_a}" ;;
+    *)       epair_mac_a="2${epair_mac_a}"  epair_mac_b="e${epair_mac_a}" ;;
+  esac
+
+  # => NP:SS:SS:II:II:II
+  setvar "$upvar_a" "0${epair_mac_a}"
+  setvar "$upvar_b" "0${epair_mac_b}"
+}
+
+interface::epair::jail2name(){
+  # Generate an epair(4) interface suffix, based on the jail name.
+  #
+  # The maximum length of a network interface name on FreeBSD is 15 characters.
+  # We use a prefix of 'eb_' for the bridge side of the interface, and 'ej_'
+  # for the jail side. This leaves 12 characters for a unique suffix for each
+  # jail.
+  #
+  # If the sanitized jail name is less than 12 characters, we'll simply use it
+  # for the suffix. Otherwise, we'll use the last 12 characters of the jail
+  # name's SHA-1 hash.
+  local name=$1 epair
+  epair=$(printf '%s' "$name" | tr -dC '[:alnum:]_')
+
+  if [ "${#epair}" -gt "$EPAIR_NAME_MAX" ]; then
+    printf '%s' "$name" | sha1 | tail -c "$EPAIR_NAME_MAX"
+  else
+    printf '%s' "$epair"
+  fi
+}
+
 
 jail::exec() {
   local jail=$1
@@ -981,21 +1117,6 @@ jail::exec() {
 
 jail::exists(){
   test -f "/etc/jail.conf.d/${1}.conf"
-}
-
-jail::name2intf(){
-  # Usually, most people just use the jail name for the VNET interface name.
-  # However...
-  #
-  # The maximum length of a network interface name on FreeBSD appears to be
-  # 15 characters. The `jib` script, which automatically creates VNET bridges,
-  # prepends 'e0b_' to the interface name. This leaves only 11 characters for
-  # jail name. Any longer, and the you'll get SIOCSIFNAME: File name too long.
-  #
-  # Rather than write some convoluted logic for truncating the jail name and
-  # disambiguating potential clashes, let's do the dumb thing and take a chunk
-  # of the jail name's SHA-1 hash :-)
-  printf '%s' "$1" | sha1 | tail -c 12
 }
 
 jail::restart(){
