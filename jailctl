@@ -115,7 +115,6 @@ readonly DEFAULT_DATA_QUOTA=8G
 # Leave these values alone.
 readonly JAIL_BPF_RULESET=1000
 readonly DEFAULT_DEVFS_RULESET=5
-readonly EPAIR_NAME_MAX=12
 
 
 ################################################################################
@@ -253,7 +252,7 @@ Options:
 
   # Get the jail's virtual interface name.
   local epair_name
-  epair_name=$(interface::epair::jail2name "$name")
+  epair_name=$(interface::epair::derive_name "$name")
 
   # Set /etc/rc.conf values within the jail.
   sysrc -v -f "${JAIL_HOME}/${name}/etc/rc.conf" \
@@ -442,7 +441,8 @@ cmd::destroy_template(){
   local help="Delete a jail template.
 Options:
   -y  Don't prompt for confirmation
-Note: a template cannot be deleted while its clones still exist."
+Notes:
+  A template cannot be deleted while its clones still exist."
 
   local noconfirm=false answer opt
 
@@ -541,14 +541,7 @@ cmd::edit(){
   local usage='edit JAIL'
   local help='Edit jail configuration.'
 
-  local opt
-  while getopts :h opt; do
-    case $opt in
-      h) cmd::help ;;
-      ?) cmd::usage "unknown option: -${OPTARG}" ;;
-    esac
-  done
-  shift $((OPTIND - 1))
+  cmd::getopt_help "$@"; shift $((OPTIND - 1))
 
   [ $# -lt 1 ] && cmd::usage 'JAIL not specified'
   [ $# -gt 1 ] && cmd::usage 'too many arguments'
@@ -914,7 +907,7 @@ cmd::show(){
 }
 
 cmd::status(){
-  local usage='statistics JAIL'
+  local usage='status JAIL'
   local help='Show running jail status.'
 
   cmd::getopt_help "$@"; shift $((OPTIND - 1))
@@ -972,7 +965,7 @@ DO NOT RUN THIS COMMAND MANUALLY. It is invoked by each jail's exec.prestart."
   interface::exists "$interface" || die "no such interface: ${interface}"
   interface::exists "$bridge"    || die "no such bridge: ${bridge}"
 
-  epair_name=$(interface::epair::jail2name "$jail")
+  epair_name=$(interface::epair::derive_name "$jail")
   interface::epair::derive_mac "$interface" "$jail" epair_bridge_mac epair_jail_mac
 
   new_epair=$(ifconfig epair create)
@@ -998,7 +991,7 @@ DO NOT RUN THIS COMMAND MANUALLY. It is invoked by each jail's exec.poststop."
   [ $# -gt 2 ] && cmd::usage 'too many arguments'
   local jail=$1 epair_name
 
-  epair_name=$(interface::epair::jail2name "$jail")
+  epair_name=$(interface::epair::derive_name "$jail")
   ifconfig "eb_${epair_name}" destroy
 }
 
@@ -1073,7 +1066,7 @@ interface::epair::derive_mac(){
   setvar "$upvar_b" "0${epair_mac_b}"
 }
 
-interface::epair::jail2name(){
+interface::epair::derive_name(){
   # Generate an epair(4) interface suffix, based on the jail name.
   #
   # The maximum length of a network interface name on FreeBSD is 15 characters.
@@ -1084,13 +1077,13 @@ interface::epair::jail2name(){
   # If the sanitized jail name is less than 12 characters, we'll simply use it
   # for the suffix. Otherwise, we'll use the last 12 characters of the jail
   # name's SHA-1 hash.
-  local name=$1 epair
-  epair=$(printf '%s' "$name" | tr -dC '[:alnum:]_')
+  local name=$1 sanitized
+  sanitized=$(printf '%s' "$name" | tr -dC '[:alnum:]_')
 
-  if [ "${#epair}" -gt "$EPAIR_NAME_MAX" ]; then
-    printf '%s' "$name" | sha1 | tail -c "$EPAIR_NAME_MAX"
+  if [ "${#sanitized}" -le 12 ]; then
+    printf '%s' "$sanitized"
   else
-    printf '%s' "$epair"
+    printf '%s' "$name" | sha1 | tail -c 12
   fi
 }
 
