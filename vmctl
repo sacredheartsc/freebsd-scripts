@@ -1,0 +1,573 @@
+#!/bin/sh
+
+# -----------------------------------------------------------------------------
+# BSD 2-Clause License
+#
+# Copyright (c) 2023, stonewall (stonewall@sacredheartsc.com)
+# Copyright (c) 2016, Devin Teske
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+# 1. Redistributions of source code must retain the above copyright notice, this
+#    list of conditions and the following disclaimer.
+#
+# 2. Redistributions in binary form must reproduce the above copyright notice,
+#    this list of conditions and the following disclaimer in the documentation
+#    and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+# OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+# -----------------------------------------------------------------------------
+#                                    JMJ
+
+# Shellcheck doesn't support FreeBSD's /bin/sh, but we can get pretty close:
+# shellcheck shell=dash disable=SC3033
+:
+
+set -eu -o pipefail
+
+cmd::main(){
+  local usage="COMMAND [ARGS]...
+Commands:
+  create        Create a new VM
+  console       Open serial console
+  delete-iso    Delete an ISO
+  destroy       Destroy a VM and its dataset
+  download-iso  Download an ISO
+  init          Initialize the bhyve dataset
+  list          List VMs
+  list-isos     List available ISOs
+  restart       Restart a VM
+  start         Start a VM
+  stop          Stop a VM"
+
+  cmd::getopt_help "$@"; shift $((OPTIND - 1))
+
+  [ $# -ge 1 ] || cmd::usage 'no comand specified'
+  local cmd=$1; shift
+
+  case $cmd in
+    console)          cmd::console "$@" ;;
+    create)           cmd::create "$@" ;;
+    delete-iso|rmi)   cmd::delete_iso "$@" ;;
+    destroy|rm)       cmd::destroy "$@" ;;
+    download-iso|dli) cmd::download_iso "$@" ;;
+    init)             cmd::init "$@" ;;
+    list|li)          cmd::list "$@" ;;
+    list-isos|lsi)    cmd::list_isos "$@" ;;
+    restart|reboot)   cmd::restart "$@" ;;
+    start)            cmd::start "$@" ;;
+    stop)             cmd::stop "$@" ;;
+    *)                cmd::usage "unknown command: ${cmd}" ;;
+  esac
+}
+
+
+################################################################################
+# Global variable definitions.
+################################################################################
+readonly VM_HOME=/usr/local/bhyve
+readonly VM_DATASET=zroot/bhyve
+
+readonly TRUNK_INTERFACE=lagg0
+readonly DEFAULT_CPUS=4
+readonly DEFAULT_MEMORY=4G
+readonly DEFAULT_OS_SIZE=24G
+readonly DEFAULT_DATA_SIZE=8G
+readonly DEFAULT_VLAN=199
+
+# Leave these values alone.
+readonly VM_CONFDIR=/usr/local/etc/bhyve.d
+readonly TAP_NAME_MAX=11
+
+
+################################################################################
+# Standard helper functions.
+################################################################################
+die(){
+  printf '%s: %s\n' vmctl "$*" 1>&2
+  exit 1
+}
+
+
+################################################################################
+# CLI-related functions.
+################################################################################
+cmd::help(){
+  printf 'Usage: %s %s\n' vmctl "$usage"
+  [ -n "${help:-}" ] && printf '%s\n' "$help"
+  exit 0
+}
+
+cmd::usage(){
+  [ $# -gt 0 ] && printf '%s: %s\n' "vmctl" "$1" 1>&2
+  printf 'Usage: %s %s\n' vmctl "${usage}" 1>&2
+  exit 2
+}
+
+cmd::getopt_help(){
+  local opt
+  while getopts :h opt; do
+    case $opt in
+      h) cmd::help ;;
+      ?) cmd::usage "unknown option: -${OPTARG}" ;;
+    esac
+  done
+}
+
+cmd::console(){
+  local usage='console VM'
+  local help='Connect to serial console.'
+
+  cmd::getopt_help "$@"; shift $((OPTIND - 1))
+
+  [ $# -lt 1 ] && cmd::usage 'VM not specified'
+  [ $# -gt 1 ] && cmd::usage 'too many arguments'
+
+  vm::exists "$1"  || die "no such vm: ${1}"
+  vm::running "$1" || die "vm not running: ${1}"
+
+  cu -l "/dev/nmdm_${1}B" -s 9600
+}
+
+cmd::create(){
+  local usage='create [-c CORES] [-m MEM] [-q DATA_QUOTA] [-Q OS_QUOTA] [-v VLANID] NAME [TEMPLATE]'
+  local help="Create a new VM.
+Options:
+  -c CORES       Number of CPU cores
+  -m MEM         Size of memory (RAM)
+  -q DATA_QUOTA  Size of data disk
+  -Q OS_QUOTA    Size of OS disk
+  -v VLANID      VLAN ID number"
+
+  local \
+    vm_cpus=$DEFAULT_CPUS \
+    vm_data_size=$DEFAULT_DATA_SIZE \
+    vm_memory=$DEFAULT_MEMORY \
+    vm_os_size=$DEFAULT_OS_SIZE \
+    vm_vlan=$DEFAULT_VLAN \
+    opt
+  while getopts :c:hm:q:Q:v: opt; do
+    case $opt in
+      c) vm_cpus=$OPTARG ;;
+      h) cmd::help ;;
+      m) vm_memory=$OPTARG ;;
+      q) vm_data_size=$OPTARG ;;
+      Q) vm_os_size=$OPTARG ;;
+      v) vm_vlan=$OPTARG ;;
+      :) cmd::usage "missing option value: -${OPTARG}" ;;
+      ?) cmd::usage "unknown option: -${OPTARG}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  [ $# -lt 1 ] && cmd::usage 'NAME not specified'
+  [ $# -gt 2 ] && cmd::usage 'too many arguments'
+  local name=$1 template=${2:-}
+
+  vm::exists "$name" && die "vm name already in use: ${name}"
+
+  if [ -n "$template" ]; then
+    die unimplemented
+  else
+    zfs create -v -o volmode=none "${VM_DATASET}/${name}"
+    zfs create -v -o volmode=dev -V "$vm_os_size"   "${VM_DATASET}/${name}/os"
+    zfs create -v -o volmode=dev -V "$vm_data_size" "${VM_DATASET}/${name}/data"
+  fi
+
+  local vm_mac
+  interface::derive_mac "$TRUNK_INTERFACE" "$name" vm_mac
+
+  cat <<EOF > "${VM_CONFDIR}/${name}.conf"
+name=${name}
+cpus=${vm_cpus}
+memory.size=${vm_memory}
+acpi_tables=true
+destroy_on_poweroff=true
+keyboard.layout=us_unix
+rtc.use_localtime=false
+x86.strictmsr=true
+x86.vmexit_on_hlt=true
+x86.vmexit_on_pause=true
+pci.0.0.0.device=hostbridge
+pci.0.1.0.device=lpc
+pci.0.2.0.device=virtio-net
+pci.0.2.0.backend=tap_$(interface::tap::vm2name "$name")
+pci.0.2.0.mac=${vm_mac}
+pci.0.3.0.device=nvme
+pci.0.3.0.path=/dev/zvol/${VM_DATASET}/%(name)/os
+pci.0.4.0.device=nvme
+pci.0.4.0.path=/dev/zvol/${VM_DATASET}/%(name)/data
+lpc.com1.path=/dev/nmdm_%(name)A
+vmctl.vlan=${vm_vlan}
+EOF
+}
+
+cmd::delete_iso(){
+  local usage='delete-iso ISO'
+  local help='Delete an ISO.'
+
+  cmd::getopt_help "$@"; shift $((OPTIND - 1))
+
+  [ $# -lt 1 ] && cmd::usage 'ISO not specified'
+  [ $# -gt 1 ] && cmd::usage 'too many arguments'
+  iso=$1
+
+  iso::exists "$iso" || die "no such iso: ${iso}"
+  rm "${VM_HOME}/isos/${iso}.iso"
+}
+
+cmd::destroy(){
+  local usage='destroy [-y] VM'
+  local help="Delete a VM and its dataset.
+Options:
+  -y  Don't prompt for confirmation"
+
+  local noconfirm=false answer opt
+
+  while getopts :hy opt; do
+    case $opt in
+      h) cmd::help ;;
+      y) noconfirm=true ;;
+      ?) cmd::usage "unknown option: -${OPTARG}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  [ $# -lt 1 ] && cmd::usage 'VM not specified'
+  [ $# -gt 1 ] && cmd::usage 'too many arguments'
+  local vm=$1
+
+  vm::exists "$vm" || die "no such vm: ${vm}"
+
+  if [ "$noconfirm" != true ]; then
+    read -rp "Really destroy vm ${vm}? (y/N) " answer
+    case $answer in
+      [yY]|[yY][eE][sS]) : ;;
+      *) die 'operation cancelled' ;;
+    esac
+  fi
+
+  vm::running "$1" && vm::stop "$1" KILL
+
+  # Delete VM config file.
+  rm "${VM_CONFDIR}/${vm}.conf"
+
+  # Destroy the VM's dataset.
+  zfs destroy -v -r "${VM_DATASET}/${vm}"
+}
+
+cmd::download_iso(){
+  local usage='download-iso URL [NAME]'
+  local help='Download an ISO.'
+
+  cmd::getopt_help "$@"; shift $((OPTIND - 1))
+
+  [ $# -lt 1 ] && cmd::usage 'URL not specified'
+  [ $# -gt 2 ] && cmd::usage 'too many arguments'
+  local url=$1 name=${2:-}
+
+  [ -n "$name" ] || name=$(basename "$url" .iso)
+
+  iso::exists "$name" && die "iso already exists: ${name}"
+
+  fetch -o "${VM_HOME}/isos/${name}.iso" "$url"
+}
+
+cmd::init(){
+  local usage='init'
+  local help='Initialize bhyve dataset.'
+
+  cmd::getopt_help "$@"; shift $((OPTIND - 1))
+
+  [ $# -eq 0 ] || cmd::usage 'too many arguments'
+
+  # Create the bhyve parent dataset.
+  [ -d "$VM_HOME" ] || zfs create -v -o "mountpoint=${VM_HOME}" "$VM_DATASET"
+  [ -d "${VM_HOME}/isos" ] || zfs create -v "${VM_DATASET}/isos"
+  chmod 700 "$VM_HOME"
+
+  # Enable vmm (bhyve) and nmdm (virtual console) kernel modules.
+  local module
+  for module in vmm nmdm; do
+    kldstat -qm "$module" || kldload -v "$module"
+    sysrc -v -f /boot/loader.conf "${module}_load=YES"
+  done
+
+  sysctl net.link.tap.up_on_open=1
+  grep -xqF 'net.link.tap.up_on_open=1' /etc/sysctl.conf \
+    || echo 'net.link.tap.up_on_open=1' | tee -a /etc/sysctl.conf
+
+  mkdir -p "$VM_CONFDIR"
+}
+
+cmd::list(){
+  local usage='list [-t]'
+  local help='List configured VMs.'
+
+  cmd::getopt_help "$@"; shift $((OPTIND - 1))
+  [ $# -eq 0 ] || cmd::usage 'too many arguments'
+
+  for file in "${VM_CONFDIR}"/*.conf; do
+    [ -e "$file" ] || continue
+    name=${file##*/}
+    name=${name%.conf}
+    printf '%s\n' "$name"
+  done
+}
+
+cmd::list_isos(){
+  local usage='list-isos'
+  local help='List available ISOs.'
+
+  cmd::getopt_help "$@"; shift $((OPTIND - 1))
+  [ $# -gt 0 ] && cmd::usage 'too many arguments'
+
+  local file
+  for file in "${VM_HOME}"/isos/*.iso; do
+    [ -e "$file" ] || continue
+    name=${file##*/}
+    name=${name%.iso}
+    printf '%s\n' "$name"
+  done
+}
+
+cmd::restart(){
+  local usage='restart VM'
+  local help='Restart a VM.'
+
+  cmd::getopt_help "$@"; shift $((OPTIND - 1))
+
+  [ $# -lt 1 ] && cmd::usage 'VM not specified'
+  [ $# -gt 1 ] && cmd::usage 'too many arguments'
+
+  vm::exists "$1"  || die "no such vm: ${1}"
+  vm::running "$1" || die "vm not running: ${1}"
+
+  vm::stop "$1"
+  vm::start "$1"
+}
+
+cmd::start(){
+  local usage='start [-i ISO] VM'
+  local help='Start a VM.
+Options:
+  -i ISO  Boot from an ISO'
+
+  local iso opt
+  while getopts :hi: opt; do
+    case $opt in
+      h) cmd::help ;;
+      i) iso=$OPTARG ;;
+      ?) cmd::usage "unknown option: -${OPTARG}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  [ $# -lt 1 ] && cmd::usage 'VM not specified'
+  [ $# -gt 1 ] && cmd::usage 'too many arguments'
+
+  vm::exists "$1"  || die "no such vm: ${1}"
+  vm::running "$1" && die "vm already running: ${1}"
+
+  if [ -n "${iso:-}" ]; then
+    iso::exists "$iso" || die "no such iso: ${iso}"
+  fi
+
+  vm::start "$1" "${iso:-}"
+}
+
+cmd::stop(){
+  local usage='start VM'
+  local help='Shutdown a VM.
+Options:
+  -f  Send SIGKILL'
+
+  local opt signal=TERM
+  while getopts :fh opt; do
+    case $opt in
+      f) signal=KILL ;;
+      h) cmd::help ;;
+      ?) cmd::usage "unknown option: -${OPTARG}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  [ $# -lt 1 ] && cmd::usage 'VM not specified'
+  [ $# -gt 1 ] && cmd::usage 'too many arguments'
+
+  vm::exists "$1"  || die "no such vm: ${1}"
+  vm::running "$1" || die "vm not running: ${1}"
+
+  vm::stop "$1" "$signal"
+}
+
+
+################################################################################
+# "Library" functions.
+################################################################################
+interface::derive_mac(){
+  # Derive unique mac addresses for an epair interface, based on the physical
+  # interface address + vm name.
+  local iface=$1 name=$2 upvar=$3
+  local hwaddr checksum virtual_mac
+
+  # Source: /usr/share/examples/jails/jib
+  # Calculate MAC address derived from given iface.
+  #
+  # The formula I'm using is ``NP:SS:SS:II:II:II'' where:
+  # + N denotes 4 bits used as a counter to support branching
+  #   each parent interface up to 15 times under the same jail
+  #   name (see S below).
+  # [NOTE: I'm not doing this. Since I have only one intf per VM, N=1.]
+  # + P denotes the special nibble whose value, if one of
+  #   2, 6, A, or E (but usually 2) denotes a privately
+  #   administered MAC address (while remaining routable).
+  # + S denotes 16 bits, the sum(1) value of the jail name.
+  # + I denotes bits that are inherited from parent interface.
+  #
+  # The S bits are a CRC-16 checksum of NAME, allowing the jail
+  # to change link numbers in ng_bridge(4) without affecting the
+  # MAC address. Meanwhile, if...
+  #   + the jail NAME changes (e.g., it was duplicated and given
+  #     a new name with no other changes)
+  #   + the underlying network interface changes
+  #   + the jail is moved to another host
+  # the MAC address will be recalculated to a new, similarly
+  # unique value preventing conflict.
+  #
+  hwaddr=$(ifconfig "$iface" ether | awk '/ether/,$0=$2')
+
+  # ??:??:??:II:II:II
+  virtual_mac=${hwaddr#??:??:??} # => :II:II:II
+
+  # => :SS:SS:II:II:II
+  checksum=$(printf '%s' "$name" | sum | cut -d' ' -f1)
+  virtual_mac="$(printf ':%02x:%02x' "$(( checksum >> 8 & 255 ))" "$(( checksum & 255 ))")${virtual_mac}"
+
+  # => P:SS:SS:II:II:II
+  case $hwaddr in
+    ?2:*)    virtual_mac="e${virtual_mac}" ;;
+    ?[Ee]:*) virtual_mac="6${virtual_mac}" ;;
+    *)       virtual_mac="e${virtual_mac}" ;;
+  esac
+
+  # => NP:SS:SS:II:II:II
+  setvar "$upvar" "1${virtual_mac}"
+}
+
+interface::tap::vm2name(){
+  # Generate an tap(4) interface suffix, based on the vm name.
+  #
+  # The maximum length of a network interface name on FreeBSD is 15 characters.
+  # We use a prefix of 'tap_', leaving 11 characters for a unique suffix for each
+  # vm.
+  #
+  # If the sanitized vm name is less than 11 characters, we'll simply use it
+  # for the suffix. Otherwise, we'll use the last 11 characters of the vm
+  # name's SHA-1 hash.
+  local name=$1 tap
+  tap=$(printf '%s' "$name" | tr -dC '[:alnum:]_')
+
+  if [ "${#tap}" -gt "$TAP_NAME_MAX" ]; then
+    printf '%s' "$name" | sha1 | tail -c "$TAP_NAME_MAX"
+  else
+    printf '%s' "$tap"
+  fi
+}
+
+iso::exists(){
+  test -f "${VM_HOME}/isos/${1}.iso"
+}
+
+vm::exists(){
+  test -f "${VM_CONFDIR}/${1}.conf"
+}
+
+vm::pid(){
+  pgrep -fx "bhyveload .* ${1}" || pgrep -fx "bhyve: ${1}"
+}
+
+vm::run(){
+  local vm=$1 iso=${2:-} memsize bootdisk zvol iso_args bootcount=0 rc=0
+
+  memsize=$(vm::config::get "$vm" memory.size)
+  zvol=/dev/zvol/${VM_DATASET}/${vm}/os
+  bootdisk=$zvol
+  iso_args=''
+
+  while [ "$rc" -eq 0 ]; do
+    if [ -n "$iso" ]; then
+      # If this is the first boot, or no bootsector exists, boot from ISO.
+      if [ "$bootcount" -eq 0 ] || ! file -bs "$zvol" | grep -q 'boot sector'; then
+        bootdisk="${VM_HOME}/isos/${iso}.iso"
+        iso_args="-s 31:0,ahci-cd,${bootdisk}"
+      else
+        # Otherwise, boot from disk.
+        bootdisk=$zvol
+        iso_args=''
+      fi
+    fi
+
+    bootcount=$(( bootcount + 1 ))
+
+    bhyveload -m "$memsize" -c "/dev/nmdm_${vm}A" -d "$bootdisk" "$vm" ||:
+    # shellcheck disable=SC2086
+    bhyve -k "${VM_CONFDIR}/${vm}.conf" $iso_args "$vm" && rc=$? || rc=$?
+  done
+
+  bhyvectl --vm="${vm}" --destroy
+  ifconfig "tap_$(interface::tap::vm2name "$vm")" destroy
+}
+
+vm::running(){
+  vm::pid "$1" > /dev/null
+}
+
+vm::stop(){
+  local vm=$1 signal=${2:-TERM} pid
+
+  pid=$(vm::pid "$vm")
+
+  kill -s "$signal" "$pid"
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 1
+  done
+}
+
+vm::start(){
+  local vm=$1 iso=${2:-} vlan newif tap_name
+
+  vlan=$(vm::config::get "$vm" vmctl.vlan)
+  tap_name=$(interface::tap::vm2name "$vm")
+
+  newif=$(ifconfig tap create)
+  ifconfig "bridge${vlan}" addm "$newif"
+  ifconfig "$newif" name "tap_${tap_name}" descr "vm/${vm}"
+
+  vm::run "$vm" "$iso" 2>&1 &
+}
+
+vm::config::get(){
+  local vm=$1 key=$2
+  awk -F= -v "key=${key}" \
+    '$1 == key {rc=1; print $2} END {exit !rc}' \
+    "${VM_CONFDIR}/${vm}.conf" \
+    || die "config value not set for vm ${vm}: ${key}"
+}
+
+vm::template::exists(){
+  zfs list -H "${VM_DATASET}/templates/${1}" > /dev/null 2>&1
+}
+
+
+cmd::main "$@"
