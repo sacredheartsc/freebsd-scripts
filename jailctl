@@ -867,14 +867,7 @@ cmd::restart(){
   local usage='restart JAIL'
   local help='Restart a jail.'
 
-  local opt
-  while getopts :h opt; do
-    case $opt in
-      h) cmd::help ;;
-      ?) cmd::usage "unknown option: -${OPTARG}" ;;
-    esac
-  done
-  shift $((OPTIND - 1))
+  cmd::getopt_help "$@"; shift $((OPTIND - 1))
 
   [ $# -lt 1 ] && cmd::usage 'no jail specified'
   [ $# -gt 1 ] && cmd::usage 'too many arguments'
@@ -903,14 +896,7 @@ cmd::show(){
   local usage='show JAIL'
   local help='Show jail configuration.'
 
-  local opt
-  while getopts :h opt; do
-    case $opt in
-      h) cmd::help ;;
-      ?) cmd::usage "unknown option: -${OPTARG}" ;;
-    esac
-  done
-  shift $((OPTIND - 1))
+  cmd::getopt_help "$@"; shift $((OPTIND - 1))
 
   [ $# -lt 1 ] && cmd::usage 'JAIL not specified'
   [ $# -gt 1 ] && cmd::usage 'too many arguments'
@@ -992,7 +978,7 @@ DO NOT RUN THIS COMMAND MANUALLY. It is invoked by each jail's exec.prestart."
   new_epair=$(ifconfig epair create)
   ifconfig "$bridge" addm "$new_epair"
 
-  ifconfig "$new_epair"       name "eb_${epair_name}"
+  ifconfig "$new_epair"       name "eb_${epair_name} descr jail/${jail}"
   ifconfig "eb_${epair_name}" up
   ifconfig "eb_${epair_name}" ether "$epair_bridge_mac"
 
