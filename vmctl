@@ -440,7 +440,7 @@ cmd::create_template(){
 }
 
 cmd::destroy_iso(){
-  local usage='delete-iso ISO'
+  local usage='destroy-iso ISO'
   local help='Delete an ISO.'
 
   cmd::getopt_help "$@"; shift $((OPTIND - 1))
