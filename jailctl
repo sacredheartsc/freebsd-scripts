@@ -37,29 +37,30 @@ set -eu -o pipefail
 
 cmd::main(){
   local usage="COMMAND [ARGS]...
+FreeBSD jail management utility.
 Commands:
-  create                Create a new jail
-  create-snapshot|snap  Take a snapshot of a jail
-  create-template       Create a template from a jail
-  destroy-snapshot|rms  Delete a jail snapshot
-  destroy-template|rmt  Delete a template
-  destroy|rm            Delete a jail and its dataset
-  download-release      Download and create a FreeBSD release template
-  edit                  Edit a jail's configuration
-  exec                  Run a command within the jail
-  init                  Initialize the jail dataset
-  list-snapshots|lss    List jail snapshots
-  list-templates|lst    List available templates
-  list|ls               List configured jails
-  reprovision           Wipe and reprovision an OS dataset from template
-  restart               Restart a jail
-  rollback              Rollback a jail to a given snapshot
-  shell|sh              Run a shell within the jail
-  show                  Show jail configuration
-  start                 Start a jail
-  status                Show running jail status
-  stop                  Stop a jail
-  update-release        Update a FreeBSD release template"
+  create            Create a new jail
+  create-snapshot   Take a snapshot of a jail
+  create-template   Create a template from a jail
+  destroy-snapshot  Delete a jail snapshot
+  destroy-template  Delete a template
+  destroy           Delete a jail and its dataset
+  download-release  Download and create a FreeBSD release template
+  edit              Edit a jail's configuration
+  exec              Run a command within the jail
+  init              Initialize the jail dataset
+  list-snapshots    List jail snapshots
+  list-templates    List available templates
+  list              List configured jails
+  reprovision       Wipe and reprovision an OS dataset from template
+  restart           Restart a jail
+  rollback          Rollback a jail to a given snapshot
+  shell             Run a shell within the jail
+  show              Show jail configuration
+  start             Start a jail
+  status            Show running jail status
+  stop              Stop a jail
+  update-release    Update a FreeBSD release template"
 
   cmd::getopt_help "$@"; shift $((OPTIND - 1))
 
@@ -68,32 +69,32 @@ Commands:
   shift
 
   case $cmd in
-    create)                cmd::create "$@" ;;
-    create-snapshot|snap)  cmd::create_snapshot "$@" ;;
-    create-template)       cmd::create_template "$@" ;;
-    destroy-snapshot|rms)  cmd::destroy_snapshot "$@" ;;
-    destroy-template|rmt)  cmd::destroy_template "$@" ;;
-    destroy|rm)            cmd::destroy "$@" ;;
-    download-release)      cmd::download_release "$@" ;;
-    edit)                  cmd::edit "$@" ;;
-    exec)                  cmd::exec "$@" ;;
-    init)                  cmd::init "$@" ;;
-    list-snapshots|lss)    cmd::list_snapshots "$@" ;;
-    list-templates|lst)    cmd::list_templates "$@" ;;
-    list|ls)               cmd::list "$@" ;;
-    reprovision)           cmd::reprovision "$@" ;;
-    restart)               cmd::restart "$@" ;;
-    rollback)              cmd::rollback "$@" ;;
-    shell|sh)              cmd::shell "$@" ;;
-    show)                  cmd::show "$@" ;;
-    start)                 cmd::start "$@" ;;
-    status)                cmd::status "$@" ;;
-    stop)                  cmd::stop "$@" ;;
-    update-release)        cmd::update_release "$@" ;;
+    create)                         cmd::create "$@" ;;
+    create-snapshot|snapshot|snap)  cmd::create_snapshot "$@" ;;
+    create-template)                cmd::create_template "$@" ;;
+    destroy-snapshot|rms)           cmd::destroy_snapshot "$@" ;;
+    destroy-template|rmt)           cmd::destroy_template "$@" ;;
+    destroy|rm)                     cmd::destroy "$@" ;;
+    download-release)               cmd::download_release "$@" ;;
+    edit)                           cmd::edit "$@" ;;
+    exec)                           cmd::exec "$@" ;;
+    init)                           cmd::init "$@" ;;
+    list-snapshots|lss)             cmd::list_snapshots "$@" ;;
+    list-templates|lst)             cmd::list_templates "$@" ;;
+    list|ls)                        cmd::list "$@" ;;
+    reprovision)                    cmd::reprovision "$@" ;;
+    restart)                        cmd::restart "$@" ;;
+    rollback)                       cmd::rollback "$@" ;;
+    shell|sh)                       cmd::shell "$@" ;;
+    show)                           cmd::show "$@" ;;
+    start)                          cmd::start "$@" ;;
+    status)                         cmd::status "$@" ;;
+    stop)                           cmd::stop "$@" ;;
+    update-release)                 cmd::update_release "$@" ;;
     # The following commands are internal to jailctl. Don't run them manually.
-    _create-epair)         cmd::_create_epair "$@" ;;
-    _destroy-epair)        cmd::_destroy_epair "$@" ;;
-    *)                     cmd::usage "unknown command: ${cmd}" ;;
+    _create-epair)                  cmd::_create_epair "$@" ;;
+    _destroy-epair)                 cmd::_destroy_epair "$@" ;;
+    *)                              cmd::usage "unknown command: ${cmd}" ;;
   esac
 }
 
@@ -153,15 +154,15 @@ cmd::getopt_help(){
 
 cmd::create(){
   local usage='create [-a IP] [-b] [-c CPULIMIT] [-d DOMAIN] [-g GATEWAY] [-k SSHKEY]
-        [-m MEMLIMIT] [-n NETMASK] [-q QUOTA] [-Q OS_QUOTA] [-r NAMESERVER]
-        [-s SEARCHDOMAIN] [-v VLANID] NAME TEMPLATE'
+       [-m MEMLIMIT] [-n NETMASK] [-q QUOTA] [-Q OS_QUOTA] [-r NAMESERVER]
+       [-s SEARCHDOMAIN] [-v VLANID] NAME TEMPLATE'
   local help="Create a new jail.
 Options:
   -a IP            IPv4 address
   -b               Enable BPF device (allows DHCP, tcpdump, etc)
   -c CPULIMIT      %CPU limit (100 for one core, 200 for two cores, etc)
   -d DOMAIN        Host domain name
-  -g GATEWAY       Default IPv4 gateway.
+  -g GATEWAY       Default IPv4 gateway
   -k SSHKEY        Path to SSH pubkey for root's authorized_keys
   -m MEMLIMIT      Virtual memory limit
   -n NETMASK       IPv4 netmask
@@ -410,11 +411,14 @@ Options:
   local datasets=''
 
   if [ "${snapshot#*@}" != "$snapshot" ]; then
+    # If the snapshot name contains '@', then we have something like 'os@snapname'.
     zfs::dataset_exists "${JAIL_DATASET}/${jail}/${snapshot}" && \
       datasets="${JAIL_DATASET}/${jail}/${snapshot}"
   else
+    # Otherwise, check if either os or data dataset contains a matching snapshot.
     zfs::dataset_exists "${JAIL_DATASET}/${jail}/os@${snapshot}" && \
       datasets="${JAIL_DATASET}/${jail}/os@${snapshot}"
+
     zfs::dataset_exists "${JAIL_DATASET}/${jail}/data@${snapshot}" && \
       datasets="${datasets} ${JAIL_DATASET}/${jail}/data@${snapshot}"
   fi
@@ -663,9 +667,9 @@ Options:
   local opt terse=false dataset=''
   while getopts :dhot opt; do
     case $opt in
-      d) dataset='/data' ;;
+      d) dataset=/data ;;
       h) cmd::help ;;
-      o) dataset='/os' ;;
+      o) dataset=/os ;;
       t) terse=true ;;
       ?) cmd::usage "unknown option: -${OPTARG}" ;;
     esac
@@ -674,16 +678,17 @@ Options:
 
   [ $# -lt 1 ] && cmd::usage 'JAIL not specified'
   [ $# -gt 1 ] && cmd::usage 'too many arguments'
+  local jail=$1
 
-  jail::exists "$1" || die "no such jail: ${1}"
+  jail::exists "$jail" || die "no such jail: ${jail}"
 
   if [ "$terse" = true ]; then
-    zfs list -r -t snapshot -H -o name -s creation "${JAIL_DATASET}/${1}${dataset}" 2>/dev/null \
+    zfs list -r -t snapshot -H -o name -s creation "${JAIL_DATASET}/${jail}${dataset}" 2>/dev/null \
       | sed 's/^.*\///' \
       | sort -k1,1 -t@ -s
   else
     { echo 'DATASET SNAPSHOT USED REFER'
-      zfs list -r -t snapshot -H -o name,used,refer -s creation "${JAIL_DATASET}/${1}${dataset}" 2>/dev/null
+      zfs list -r -t snapshot -H -o name,used,refer -s creation "${JAIL_DATASET}/${jail}${dataset}" 2>/dev/null
     } | sed 's/^.*\///' \
       | sort -k1,1 -t@ -s \
       | tr '@' ' ' \

@@ -717,7 +717,7 @@ cmd::list(){
       if [ $terse = true ]; then
         printf '%s\n' "$name"
       else
-        if pgrep -qfx "bhyve: ${name}"; then
+        if vm::running "${name}"; then
           status=running
         else
           status=stopped
