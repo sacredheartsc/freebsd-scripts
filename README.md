@@ -21,8 +21,8 @@ I rolled my own for a few reasons:
 - The FreeBSD community churns through jail managers as frequently as JavaScript developers
   churn through frontend frameworks.
 
-There are two scripts: `jailctl` and `vmctl`, for jails and bhyve virtual machines,
-respectively. Both scripts are written in FreeBSD's `/bin/sh` with no additional
+There are two scripts: `jailctl` for managing FreeBSD jails, and `vmctl` for managing
+bhyve virtual machines. Both scripts are written in FreeBSD's `/bin/sh` with no additional
 dependencies.
 
 The scripts treat jails and VMs in roughly the same fashion. Namely:
@@ -30,10 +30,8 @@ The scripts treat jails and VMs in roughly the same fashion. Namely:
 - Each jail/VM gets its own ZFS dataset, with two child datasets: `os` and `data`.
 
 - The `os` dataset contains the operating system. The `data` dataset is used to
-  store persisent application data.
-
-- This allows you to to wipe and reprovision the OS disk without needing to backup
-  and restore application data.
+  store persisent application data. This allows you to to wipe and reprovision the
+  OS disk easily.
 
 - For jails, the `data` dataset is delegated to the jail and managed from within the
   jail itself.
@@ -45,12 +43,10 @@ The scripts treat jails and VMs in roughly the same fashion. Namely:
   automatically created.
 
 - `vlan(4)` and `bridge(5)` interfaces are created as needed, using the physical
-   interface specified by the global `TRUNK_INTERFACE` variable in each script (default
-   is `lagg0`).
+   interface specified by `$TRUNK_INTERFACE` (default is `lagg0`).
 
-- For jails, static IP and SSH key configuration is performed by modifying `rc.conf`
-  and root's `authorized_keys` within the jail. For VMs, a `cloud-init` seed ISO
-  is generated for guests that support it.
+- For jails, static IPs and SSH keys configured by modifying files within the jail
+  directly. For VMs, a `cloud-init` seed ISO is generated for guests that support it.
 
 - If no IP configuration is given, DHCP is assumed.
 
@@ -103,12 +99,12 @@ use a ZFS quota of 32 GB, a memory limit of 4 GB, and a CPU limit of 400.
 The CPU limit is given in terms of percentage per core. A limit of 400 means that
 our jail can hog at most 4 CPU cores. See `man 8 rctl` for more information.
 
-    # jailctl create \
-       -v 199 \
+    # jailctl create                                   \
+       -v 199                                          \
        -a 10.11.199.17 -n 255.255.255.0 -g 10.11.199.1 \
-       -r 8.8.8.8 -r 8.8.4.4 \
-       -s sub.example.com -s example.com \
-       -c 400 -m 4G -q 32G \
+       -r 8.8.8.8 -r 8.8.4.4                           \
+       -s sub.example.com -s example.com               \
+       -c 400 -m 4G -q 32G                             \
        myjail2 freebsd13
 
 Show jail configuration:
@@ -146,10 +142,10 @@ Show jail configuration:
       exec.prestart += "rctl -a jail:$name:vmemoryuse:deny=4G";
     }
 
----------------------------- ZFS DATASET -----------------------------
-NAME                      QUOTA   USED  AVAIL  MOUNTPOINT
-zroot/jails/myjail2/os      24G   248K  24.0G  /usr/local/jails/myjail2
-zroot/jails/myjail2/data    32G    96K  32.0G  none
+    ---------------------------- ZFS DATASET -----------------------------
+    NAME                      QUOTA   USED  AVAIL  MOUNTPOINT
+    zroot/jails/myjail2/os      24G   248K  24.0G  /usr/local/jails/myjail2
+    zroot/jails/myjail2/data    32G    96K  32.0G  none
 
 Show running jail status:
 
@@ -221,13 +217,11 @@ List available ISOs:
 Create a new VM with VLAN ID 199, 2 CPUs, 4 GB of RAM, and 16 GB of disk space, booting
 from an ISO file:
 
-    # vmctl create -c 2 -m 4G -q 16G -v 199 -i FreeBSD-13.2-RELEASE-amd64-bootonly myvm1
-
-List running VMs:
-
-    # vmctl list
-    VM     STATUS
-    myvm1  running
+    # vmctl create                             \
+        -v 199                                 \
+        -c 2 -m 4G -q 16G                      \
+        -i FreeBSD-13.2-RELEASE-amd64-bootonly \
+        myvm1
 
 Connect to a VM's serial console (disconnect using `~.`):
 
@@ -246,14 +240,22 @@ List available template images:
 Create a VM from a template image, using [cloud-init](https://cloudinit.readthedocs.io/en/latest/) to
 configure SSH keys and static IP:
 
-    # vmctl create \
-        -v 199 \
+    # vmctl create                           \
+        -v 199                               \
         -a 10.11.199.64 -g 10.11.199.1 -p 24 \
-        -r 8.8.8.8 -r 4.4.4.4 \
-        -s sub.example.com -s example.com \
-        -k ~/id_ed25519.pub \
-        -c 2 -m 2G -q 32G \
-        myvm2 debian-12-generic-amd64
+        -r 8.8.8.8 -r 4.4.4.4                \
+        -s sub.example.com -s example.com    \
+        -k ~/id_ed25519.pub                  \
+        -c 2 -m 2G -q 32G                    \
+        myvm2                                \
+        debian-12-generic-amd64
+
+List running VMs:
+
+    # vmctl list
+    VM     STATUS
+    myvm1  running
+    myvm2  running
 
 Show VM configuration:
 
