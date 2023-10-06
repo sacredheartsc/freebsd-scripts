@@ -1,4 +1,4 @@
-# FreeBSD Jail/Bhyve Scripts
+# FreeBSD Jail / Bhyve Scripts
 
 This repository contains scripts for managing [jails](https://docs.freebsd.org/en/books/handbook/jails/)
 and [bhyve](https://docs.freebsd.org/en/books/handbook/virtualization/#virtualization-host-bhyve)
