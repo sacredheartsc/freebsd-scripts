@@ -622,22 +622,23 @@ cmd::download_template(){
   [ "$image_ok" = true ]   || die "unknown image type: $(basename "$url")"
   template::exists "$name" && die "template already exists: ${name}"
 
-  local zvol="/dev/zvol/${VM_DATASET}/templates/${name}"
+  local dataset="${VM_DATASET}/templates/${name}" \
+        zvol="/dev/zvol/${VM_DATASET}/templates/${name}"
 
   # Create a ZFS dataset for the template.
   # shellcheck disable=SC2086
-  zfs create -v -o volblocksize="$ZFS_VOLBLOCKSIZE" $ZFS_OPTS -o volmode=dev -V "$TEMPLATE_ZVOL_SIZE" "${VM_DATASET}/templates/${name}"
+  zfs create -v -o volblocksize="$ZFS_VOLBLOCKSIZE" $ZFS_OPTS -o volmode=dev -V "$TEMPLATE_ZVOL_SIZE" "$dataset"
 
   # Extract the template into the zvol, based on its file type.
   case $url in
     *.raw)
-      fetch "$url" -o "$zvol"
+      fetch "$url" -o "$zvol" || zfs::cleanup_and_die "$dataset"
       ;;
     *.raw.xz)
-      fetch "$url" -o - | xz -d | dd of="$zvol" bs=1M
+      fetch "$url" -o - | xz -d | dd of="$zvol" bs=1M || zfs::cleanup_and_die "$dataset"
       ;;
     *.qcow2)
-      fetch "$url" -o "/root/${name}.qcow2"
+      fetch "$url" -o "/root/${name}.qcow2" || zfs::cleanup_and_die "$dataset"
       qemu-img dd -O raw if="/root/${name}.qcow2" of="$zvol" bs=1M
       rm "/root/${name}.qcow2"
       ;;
@@ -1219,6 +1220,11 @@ zfs::ensure_snapshot(){
     zfs list -t snapshot -H "$dataset" > /dev/null 2>&1 || die "no such snapshot: ${dataset}"
     setvar "$upvar" "$dataset"
   fi
+}
+
+zfs::cleanup_and_die(){
+  zfs destroy -v -r "$1"
+  exit 1
 }
 
 zfs::dataset_exists(){
