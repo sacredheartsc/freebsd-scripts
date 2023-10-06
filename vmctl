@@ -1135,7 +1135,7 @@ vm::pid(){
 vm::run(){
   local vm=$1 iso=${2:-} bootdisk zvol iso_args bootcount=0 rc=0
 
-  zvol=/dev/zvol/${VM_DATASET}/${vm}/os
+  zvol="/dev/zvol/${VM_DATASET}/${vm}/os"
   bootdisk=$zvol
   iso_args=''
 
