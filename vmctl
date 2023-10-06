@@ -226,7 +226,7 @@ Options:
       q) data_size=$OPTARG ;;
       Q) os_size=$OPTARG ;;
       r) nameservers="${nameservers:-}${OPTARG}," ;;
-      s) searchdomains="${searchdomains:-}${OPTARG}," ;; 
+      s) searchdomains="${searchdomains:-}${OPTARG}," ;;
       v) vlan=$OPTARG ;;
       :) cmd::usage "missing option value: -${OPTARG}" ;;
       ?) cmd::usage "unknown option: -${OPTARG}" ;;
@@ -614,7 +614,7 @@ cmd::download_template(){
   for ext in .raw .raw.xz .qcow2; do
     if [ -z "${url%%*"$ext"}" ]; then
       image_ok=true
-      [ -n "$name" ] || name=$(basename "$url" "$ext")  
+      [ -n "$name" ] || name=$(basename "$url" "$ext")
       break
     fi
   done
@@ -777,7 +777,7 @@ Options:
       | sort -k1,1 -t@ -s
   else
     { echo 'DATASET SNAPSHOT USED REFER'
-      zfs list -r -t snapshot -H -o name,volsize,used,refer -s creation "${VM_DATASET}/${vm}${dataset}" 2>/dev/null
+      zfs list -r -t snapshot -H -o name,used,refer -s creation "${VM_DATASET}/${vm}${dataset}" 2>/dev/null
     } | sed 's/^.*\///' \
       | sort -k1,1 -t@ -s \
       | tr '@' ' ' \

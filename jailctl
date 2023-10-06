@@ -370,7 +370,7 @@ Options:
   if [ "$both" = true ] || [ "$os_only" = true ]; then
     zfs snapshot "${JAIL_DATASET}/${jail}/os@${snapname}"
   fi
-  
+
   # Snapshot the data dataset.
   if [ "$both" = true ] || [ "$data_only" = true ]; then
     zfs snapshot "${JAIL_DATASET}/${jail}/data@${snapname}"
@@ -917,7 +917,7 @@ cmd::shell(){
   jail::exists "$jail"  || die "no such jail: ${jail}"
   jail::running "$jail" || die "jail not running: ${jail}"
 
-  jail::exec "$jail" /bin/sh
+  jail::exec "$jail" /bin/csh
 }
 
 cmd::show(){
