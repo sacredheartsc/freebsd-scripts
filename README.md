@@ -105,7 +105,9 @@ our jail can hog at most 4 CPU cores. See `man 8 rctl` for more information.
        -r 8.8.8.8 -r 8.8.4.4                           \
        -s sub.example.com -s example.com               \
        -c 400 -m 4G -q 32G                             \
-       myjail2 freebsd13
+       -k ~/.ssh/id_ed25519.pub                        \
+       myjail2                                         \
+       freebsd13
 
 Show jail configuration:
 
