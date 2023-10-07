@@ -19,7 +19,7 @@ I rolled my own for a few reasons:
   I will never use.
 
 - The FreeBSD community churns through jail managers as frequently as JavaScript developers
-  churn through frontend frameworks.
+  churn through front-end frameworks.
 
 There are two scripts: `jailctl` for managing FreeBSD jails, and `vmctl` for managing
 bhyve virtual machines. Both scripts are written in FreeBSD's `/bin/sh` with no additional
@@ -30,7 +30,7 @@ The scripts treat jails and VMs in roughly the same fashion. Namely:
 - Each jail/VM gets its own ZFS dataset, with two child datasets: `os` and `data`.
 
 - The `os` dataset contains the operating system. The `data` dataset is used to
-  store persisent application data. This allows you to to wipe and reprovision the
+  store persistent application data. This allows you to wipe and reprovision the
   OS disk easily.
 
 - For jails, the `data` dataset is delegated to the jail and managed from within the
