@@ -96,6 +96,9 @@ Commands:
     start|boot)                    cmd::start "$@" ;;
     status)                        cmd::status "$@" ;;
     stop|shutdown)                 cmd::stop "$@" ;;
+    # The following commands are internal to vmctl.
+    _start-all)                    cmd::_start_all "$@" ;;
+    _stop-all)                     cmd::_stop_all "$@" ;;
     *)                             cmd::usage "unknown command: ${cmd}" ;;
   esac
 }
@@ -115,6 +118,7 @@ readonly DEFAULT_VLAN=1
 readonly DEFAULT_ZFS_VOLBLOCKSIZE=64k
 readonly DEFAULT_ZFS_OPTS='-o primarycache=metadata -o compress=lz4'
 readonly TEMPLATE_ZVOL_SIZE=10G
+readonly DEFAULT_AUTOSTART_DELAY=2
 
 # You can override these with an environment variable:
 readonly ZFS_VOLBLOCKSIZE=${ZFS_VOLBLOCKSIZE:-$DEFAULT_ZFS_VOLBLOCKSIZE}
@@ -176,11 +180,12 @@ Notes:
 }
 
 cmd::create(){
-  local usage='create [-a IP] [-c CORES] [-d DOMAIN] [-g GATEWAY] [-i ISO] [-k SSHKEY] [-m MEM]
-       [-p PREFIXLEN] [-q DATA_SIZE] [-Q OS_SIZE] [-r NAMESERVER]
+  local usage='create [-A] [-a IP] [-c CORES] [-d DOMAIN] [-g GATEWAY] [-i ISO] [-k SSHKEY]
+       [-m MEM] [-p PREFIXLEN] [-q DATA_SIZE] [-Q OS_SIZE] [-r NAMESERVER]
        [-s SEARCHDOMAIN] [-v VLANID] NAME [TEMPLATE]'
   local help="Create a new VM.
 Options:
+  -A               Don't autostart on boot
   -a IP            IPv4 address (cloud-init)
   -c CORES         Number of CPU cores
   -d DOMAIN        Host domain name (cloud-init)
@@ -196,6 +201,7 @@ Options:
   -v VLANID        VLAN ID number"
 
   local \
+    autostart=true \
     cpus=$DEFAULT_CPUS \
     data_size=$DEFAULT_DATA_SIZE \
     domain=$DEFAULT_DOMAIN \
@@ -212,8 +218,9 @@ Options:
     iso \
     opt
 
-  while getopts :a:c:d:g:hi:k:m:p:q:Q:r:s:v: opt; do
+  while getopts :Aa:c:d:g:hi:k:m:p:q:Q:r:s:v: opt; do
     case $opt in
+      A) autostart=false ;;
       a) ip=${OPTARG} ;;
       c) cpus=$OPTARG ;;
       d) domain=$OPTARG ;;
@@ -375,6 +382,9 @@ EOF
   # Copy initial UEFI vars.
   cp /usr/local/share/uefi-firmware/BHYVE_UEFI_VARS.fd "${VM_HOME}/${name}/uefi-vars.fd"
 
+  # Enable autostart (if requested).
+  [ "$autostart" = true ] && sysrc "vmctl_list+=${name}"
+
   # Start the VM.
   vm::start "$name" "${iso:-}"
 }
@@ -489,6 +499,9 @@ Options:
 
   # Destroy the VM's dataset.
   zfs destroy -v -r "${VM_DATASET}/${vm}"
+
+  # Remove VM from autostart list.
+  sysrc -v "vmctl_list-=${vm}"
 }
 
 cmd::destroy_snapshot(){
@@ -689,7 +702,41 @@ cmd::init(){
   grep -xqF 'net.link.tap.up_on_open=1' /etc/sysctl.conf \
     || echo 'net.link.tap.up_on_open=1' | tee -a /etc/sysctl.conf
 
+  # Install pkg dependencies.
   pkg install -y bhyve-firmware cdrkit-genisoimage qemu-tools
+
+  # Install rc.d script.
+  mkdir -p /usr/local/etc/rc.d
+  cat <<'EOF' > /usr/local/etc/rc.d/vmctl
+#!/bin/sh
+#
+# $FreeBSD$
+
+# PROVIDE: vmctl
+# REQUIRE: NETWORKING SERVERS dmesg
+# BEFORE: ipfw pf
+# KEYWORD: shutdown nojail
+
+. /etc/rc.subr
+
+name="vmctl"
+desc="Start and stop bhyve virtual machines"
+rcvar="vmctl_enable"
+
+: ${vmctl_enable="NO"}
+
+command="/usr/local/sbin/${name}"
+start_cmd="${command} _start-all"
+stop_cmd="${command} _stop-all"
+status_cmd="${command} list"
+
+load_rc_config $name
+run_rc_command "$1"
+EOF
+  chmod +x /usr/local/etc/rc.d/vmctl
+
+  # Enable vmctl on boot.
+  sysrc -v "vmctl_enable=YES"
 }
 
 cmd::list(){
@@ -708,22 +755,18 @@ cmd::list(){
 
   [ $# -eq 0 ] || cmd::usage 'too many arguments'
 
-  local file name status
+  local vm status
   { [ $terse = true ] || echo 'VM STATUS'
-    for file in "${VM_HOME}"/*/bhyve.conf; do
-      [ -e "$file" ] || continue
-
-      name=$(basename "$(dirname "$file")")
-
+    for vm in $(vm::list); do
       if [ $terse = true ]; then
-        printf '%s\n' "$name"
+        printf '%s\n' "$vm"
       else
-        if vm::running "${name}"; then
+        if vm::running "${vm}"; then
           status=running
         else
           status=stopped
         fi
-        printf '%s %s\n' "$name" "$status"
+        printf '%s %s\n' "$vm" "$status"
       fi
     done
   } | column -t
@@ -968,6 +1011,23 @@ Options:
   vm::start "$vm" "${iso:-}"
 }
 
+cmd::_start_all(){
+  local usage='_start-all'
+  local help='Start all VMs.'
+
+  cmd::getopt_help "$@"; shift $((OPTIND - 1))
+  [ $# -eq 0 ] || cmd::usage 'too many arguments'
+
+  rc::load_config
+
+  local vm
+  for vm in ${vmctl_list:-}; do
+    echo "vmctl: starting ${vm}"
+    vm::start "$vm"
+    sleep "${vmctl_delay:-$DEFAULT_AUTOSTART_DELAY}"
+  done
+}
+
 cmd::status(){
   local usage='status VM'
   local help='Show running VM status.'
@@ -1023,6 +1083,39 @@ Options:
   vm::running "$vm" || die "vm not running: ${vm}"
 
   vm::stop "$vm" "$signal"
+}
+
+cmd::_stop_all(){
+  local usage='_stop-all'
+  local help='Stop all VMs.'
+
+  cmd::getopt_help "$@"; shift $((OPTIND - 1))
+  [ $# -eq 0 ] || cmd::usage 'too many arguments'
+
+  rc::load_config
+
+  # Reverse the autostart list.
+  local vm vmctl_list_rev=''
+  for vm in ${vmctl_list:-}; do
+    vmctl_list_rev="${vm} ${vmctl_list_rev}"
+  done
+
+  # Stop the VMs in reverse order.
+  for vm in $vmctl_list_rev; do
+    if vm::running "$vm"; then
+      echo "vmctl: stopping ${vm}"
+      vm::stop "$vm"
+      sleep "${vmctl_delay:-$DEFAULT_AUTOSTART_DELAY}"
+    fi
+  done
+
+  # Stop any other VMs that might be running.
+  for vm in $(vm::list); do
+    if vm::running "$vm"; then
+      echo "vmctl: stopping ${vm}"
+      vm::stop "$vm"
+    fi
+  done
 }
 
 
@@ -1120,12 +1213,27 @@ iso::exists(){
   test -f "${VM_HOME}/isos/${1}.iso"
 }
 
+rc::load_config(){
+  set +eu +o pipefail
+  # shellcheck disable=SC1091
+  . /etc/rc.subr
+  load_rc_config vmctl
+  set -eu -o pipefail
+}
+
 template::exists(){
   zfs list -H "${VM_DATASET}/templates/${1}" > /dev/null 2>&1
 }
 
 vm::exists(){
   test -f "${VM_HOME}/${1}/bhyve.conf"
+}
+
+vm::list(){
+  for file in "${VM_HOME}"/*/bhyve.conf; do
+    [ -e "$file" ] || continue
+    printf '%s\n' "$(basename "$(dirname "$file")")"
+  done
 }
 
 vm::pid(){
